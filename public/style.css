@@ -101,8 +101,51 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 #term-toolbar .flag { color: var(--muted); font-size: 11px; display: flex; align-items: center; gap: 4px; }
 #extra-args { flex: 1; min-width: 120px; }
-#terminal { flex: 1; min-height: 0; padding: 6px 0 6px 8px; background: #0B1120; }
-#terminal .xterm { height: 100%; }
+#terminal { flex: 1; min-height: 0; position: relative; background: #0B1120; }
+.term-instance { position: absolute; inset: 6px 0 6px 8px; }
+.term-instance .xterm { height: 100%; }
+#term-empty {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; justify-content: center; align-items: center;
+  gap: 8px; color: var(--muted); text-align: center; padding: 20px;
+}
+#term-empty b { color: var(--text); }
+
+/* ---------- session tabs ---------- */
+#session-tabs {
+  display: flex; align-items: flex-end; gap: 4px; flex-wrap: wrap;
+  padding: 5px 8px 0;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+}
+#session-tabs:empty { display: none; }
+.sess-tab {
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 6px 4px 10px;
+  border: 1px solid var(--border); border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: var(--bg2); color: var(--muted);
+  cursor: pointer; user-select: none;
+  max-width: 220px;
+}
+.sess-tab.active { background: #0B1120; color: var(--text); border-color: var(--accent-dim); position: relative; top: 1px; }
+.sess-tab.dead { opacity: .55; }
+.sess-tab:hover { color: var(--text); }
+.sess-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: 0 0 auto; }
+.sess-dot.off { background: var(--red); }
+.sess-close {
+  background: none; border: none; color: var(--muted);
+  cursor: pointer; padding: 0 3px; min-height: 0; font-size: 12px; border-radius: 4px;
+}
+.sess-close:hover { color: #F87171; }
+.sess-new {
+  border: 1px dashed var(--border); border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: none; color: var(--muted);
+  padding: 4px 12px; min-height: 0;
+}
+.sess-new:hover { color: var(--accent); border-color: var(--accent-dim); }
 
 #divider {
   width: 5px; cursor: col-resize; flex: 0 0 auto;
@@ -147,7 +190,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   top: 1px;
 }
 
-/* ---------- conversations / git ---------- */
+/* ---------- conversations ---------- */
 .msg { margin: 8px 0; padding: 8px 10px; border-radius: 8px; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
 .msg.user { background: #1E2A44; border-left: 3px solid var(--blue); }
 .msg.assistant { background: var(--bg2); border-left: 3px solid var(--accent); }
@@ -155,10 +198,61 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .msg .tools { color: var(--muted); font-style: italic; }
 .back-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; position: sticky; top: 0; background: var(--panel); padding: 4px 0; z-index: 2; }
 
-.commit { cursor: pointer; }
-.commit .hash { color: var(--yellow); }
-.commit .refs { color: var(--green); font-size: 10px; }
-.git-status-line .k { color: var(--yellow); display: inline-block; width: 26px; }
+/* ---------- command list ---------- */
+.cmd-list { display: flex; flex-direction: column; gap: 2px; }
+.cmd-row {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 4px 8px; border-radius: 6px; cursor: pointer;
+}
+.cmd-row:hover { background: var(--bg3); }
+.cmd-row:hover .cmd-name { color: #4ADE80; }
+.cmd-name { color: var(--accent); flex: 0 0 auto; min-width: 130px; }
+.cmd-desc { color: var(--muted); font-size: 11px; flex: 1; min-width: 0; }
+
+/* ---------- segmented toggle ---------- */
+.seg-row { display: flex; gap: 0; margin: 2px 0 8px; }
+.seg { flex: 1; border-radius: 0; background: var(--bg2); color: var(--muted); }
+.seg:first-child { border-radius: 6px 0 0 6px; }
+.seg:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+.seg.active { background: var(--bg3); color: var(--text); border-color: var(--accent-dim); font-weight: 500; }
+.proj-head { display: flex; align-items: center; gap: 6px; margin-top: 14px; }
+.proj-head .proj-path { text-transform: none; letter-spacing: 0; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- git tab ---------- */
+.git-header {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 9px 12px; margin-bottom: 6px;
+}
+.git-branch { font-size: 14px; font-weight: 500; }
+.git-remote {
+  color: var(--muted); font-size: 11px; margin: 0 2px 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.git-files { display: flex; flex-direction: column; gap: 2px; }
+.git-file { display: flex; align-items: center; gap: 8px; padding: 3px 8px; border-radius: 6px; }
+.git-file:hover { background: var(--bg2); }
+.git-filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-chip {
+  flex: 0 0 auto; width: 34px; text-align: center;
+  font-size: 10px; border-radius: 4px; padding: 1px 0;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.git-yellow { background: #423a10; color: #FACC15; }
+.git-green { background: #113a22; color: #4ADE80; }
+.git-red { background: #431b1b; color: #F87171; }
+.git-blue { background: #17294a; color: #93C5FD; }
+.git-commits { display: flex; flex-direction: column; }
+.commit {
+  padding: 7px 10px; cursor: pointer; border-radius: 6px;
+  border-left: 2px solid var(--border); margin-left: 6px;
+}
+.commit:hover { background: var(--bg2); border-left-color: var(--accent); }
+.commit-line { display: flex; align-items: baseline; gap: 8px; }
+.commit-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.commit .hash { color: var(--yellow); font-size: 11px; flex: 0 0 auto; }
+.commit-meta { color: var(--muted); font-size: 11px; margin-top: 1px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ref-pill { border: 1px solid var(--accent-dim); color: var(--green); font-size: 10px; border-radius: 8px; padding: 0 7px; }
 
 .card {
   background: var(--bg2);

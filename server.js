@@ -142,9 +142,34 @@ function discover() {
 // ---------------------------------------------------------------------------
 // Session history for the current project
 // ---------------------------------------------------------------------------
-function projectSessionDir() {
-  const encoded = cwd.replace(/[^a-zA-Z0-9-]/g, '-');
+function sessionDirFor(projectPath) {
+  const encoded = projectPath.replace(/[^a-zA-Z0-9-]/g, '-');
   return path.join(HOME, '.claude', 'projects', encoded);
+}
+function projectSessionDir() { return sessionDirFor(cwd); }
+
+function knownProjectPaths() {
+  const cj = readJsonFile(paths().claudeJson).json || {};
+  const set = new Set(Object.keys(cj.projects || {}));
+  set.add(cwd);
+  return set;
+}
+
+// sessions across every project Claude knows about, newest first
+function listAllSessions(perProject = 20, total = 80) {
+  const out = [];
+  for (const proj of knownProjectPaths()) {
+    const dir = sessionDirFor(proj);
+    let entries;
+    try { entries = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl')); } catch { continue; }
+    const sessions = entries.map(f => {
+      const full = path.join(dir, f);
+      const st = fs.statSync(full);
+      return { id: f.replace(/\.jsonl$/, ''), mtime: st.mtimeMs, size: st.size, project: proj, file: full };
+    }).sort((a, b) => b.mtime - a.mtime).slice(0, perProject);
+    for (const s of sessions) out.push({ ...s, summary: sessionSummary(s.file), file: undefined });
+  }
+  return out.sort((a, b) => b.mtime - a.mtime).slice(0, total);
 }
 
 function sessionSummary(file) {
@@ -169,8 +194,8 @@ function sessionSummary(file) {
   return '';
 }
 
-function readTranscript(id) {
-  const file = path.join(projectSessionDir(), id + '.jsonl');
+function readTranscript(id, projectPath = cwd) {
+  const file = path.join(sessionDirFor(projectPath), id + '.jsonl');
   const raw = fs.readFileSync(file, 'utf8');
   const messages = [];
   for (const line of raw.split('\n')) {
@@ -225,6 +250,63 @@ function listSessions(limit = 50) {
 let claudeVersion = '';
 execFile('claude', ['--version'], (err, stdout) => { if (!err) claudeVersion = stdout.trim(); });
 
+// ---------------------------------------------------------------------------
+// Built-in slash commands, extracted from the installed claude binary itself.
+// A hardcoded list would hide anything added in updates; the binary is truth.
+// Cached per binary version+mtime because the scan reads ~250MB once.
+// ---------------------------------------------------------------------------
+const CMD_CACHE_FILE = path.join(__dirname, '.command-cache.json');
+let builtinCommands = [];
+
+async function extractBuiltinCommands() {
+  try {
+    const which = await new Promise((res, rej) =>
+      execFile('bash', ['-c', 'command -v claude'], (e, so) => e ? rej(e) : res(so.trim())));
+    const binPath = fs.realpathSync(which);
+    const st = fs.statSync(binPath);
+    const key = `${binPath}:${st.size}:${Math.round(st.mtimeMs)}`;
+    try {
+      const cached = JSON.parse(fs.readFileSync(CMD_CACHE_FILE, 'utf8'));
+      if (cached.key === key && cached.commands?.length) { builtinCommands = cached.commands; return; }
+    } catch {}
+    console.log('scanning claude binary for slash commands…');
+    const src = (await fs.promises.readFile(binPath)).toString('latin1');
+    const D = '"((?:[^"\\\\]|\\\\.){5,400})"';
+    const NAME = '([a-z][a-z0-9-]{1,30})';
+    const FIELDS = '(?:,(?:aliases:\\[[^\\]]{0,80}\\]|[a-zA-Z$_]+:(?:"[^"]{0,120}"|!0|!1|[0-9]+)))*';
+    const GETTER = 'get description\\(\\)\\{return[^}]{0,150}?';
+    // command objects appear in several minified shapes; union of all passes
+    const passes = [
+      { re: `type:"(?:local|local-jsx|prompt)",name:"${NAME}"${FIELDS},description:${D}` },
+      { re: `[{,]name:"${NAME}",description:${D},(?:argumentHint|isEnabled|aliases|load|call|getPromptForCommand|supportsNonInteractive|progressMessage)` },
+      { re: `[{,]description:${D}${FIELDS},name:"${NAME}",(?:aliases|argumentHint|progressMessage|type|source|supportsNonInteractive|load|call)`, swap: true },
+      { re: `type:"(?:local|local-jsx|prompt)",name:"${NAME}",(?:aliases:\\[[^\\]]{0,80}\\],)?${GETTER}${D}` },
+      { re: `[{,]name:"${NAME}",(?:aliases:\\[[^\\]]{0,80}\\],)?${GETTER}${D}` },
+    ];
+    const best = new Map();
+    for (const { re, swap } of passes) {
+      for (const m of src.matchAll(new RegExp(re, 'g'))) {
+        const name = swap ? m[2] : m[1];
+        let desc = swap ? m[1] : m[2];
+        try { desc = JSON.parse('"' + desc + '"'); } catch {}
+        if (!best.has(name) || desc.length > best.get(name).length) best.set(name, desc);
+      }
+    }
+    // commands whose descriptions are computed at runtime still deserve a row
+    for (const m of src.matchAll(new RegExp(`name:"${NAME}",(?:aliases:\\[[^\\]]{0,80}\\],)?get description\\(\\)\\{`, 'g'))) {
+      if (!best.has(m[1])) best.set(m[1], '(description is dynamic — run it to see)');
+    }
+    builtinCommands = [...best.entries()]
+      .map(([name, description]) => ({ name, description }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    fs.writeFileSync(CMD_CACHE_FILE, JSON.stringify({ key, commands: builtinCommands }, null, 1));
+    console.log(`extracted ${builtinCommands.length} built-in commands from ${path.basename(binPath)}`);
+  } catch (e) {
+    console.error('command extraction failed:', e.message);
+  }
+}
+extractBuiltinCommands();
+
 function getState() {
   const p = paths();
   const claudeJson = readJsonFile(p.claudeJson);
@@ -235,7 +317,7 @@ function getState() {
     cwd,
     home: HOME,
     claudeVersion,
-    terminal: { running: !!ptyProc, pid: ptyProc?.pid || null, args: lastArgs },
+    terminal: { sessions: sessionList() },
     account: cj.oauthAccount ? {
       email: cj.oauthAccount.emailAddress,
       organization: cj.oauthAccount.organizationName,
@@ -267,7 +349,9 @@ function getState() {
     },
     keybindings: { path: p.keybindings, ...readJsonFile(p.keybindings) },
     ...discover(),
+    builtinCommands,
     sessions: listSessions(),
+    allSessions: listAllSessions(),
     meta: {
       autoUpdates: cj.autoUpdates ?? null,
       installMethod: cj.installMethod ?? null,
@@ -303,12 +387,11 @@ function updateSettings(scope, mutate) {
 }
 
 // ---------------------------------------------------------------------------
-// PTY (the actual claude process)
+// PTY sessions — multiple concurrent claude processes, one per tab in the UI
 // ---------------------------------------------------------------------------
-let ptyProc = null;
-let lastArgs = [];
-let scrollback = '';
 const SCROLLBACK_MAX = 400_000;
+const sessions = new Map(); // sid -> { pty, cwd, args, scrollback, status, pid, createdAt }
+let sidCounter = 0;
 const termClients = new Set();
 const eventClients = new Set();
 
@@ -321,34 +404,45 @@ function broadcastEvent(msg) {
   for (const ws of eventClients) if (ws.readyState === 1) ws.send(s);
 }
 
-function startClaude({ args = [], cols = 120, rows = 32 } = {}) {
-  stopClaude();
-  scrollback = '';
-  lastArgs = args;
-  ptyProc = pty.spawn('claude', args, {
+const sessionInfo = (sid, s) => ({ sid, pid: s.pid, cwd: s.cwd, args: s.args, status: s.status, createdAt: s.createdAt });
+const sessionList = () => [...sessions.entries()].map(([sid, s]) => sessionInfo(sid, s));
+
+function startSession({ cwd: dir, args = [], cols = 120, rows = 32 } = {}) {
+  const resolved = path.resolve(String(dir || cwd).replace(/^~(?=\/|$)/, HOME));
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+    throw new Error('not a directory: ' + resolved);
+  }
+  const sid = 's' + (++sidCounter);
+  const proc = pty.spawn('claude', (Array.isArray(args) ? args : []).map(String), {
     name: 'xterm-256color',
-    cols, rows,
-    cwd,
+    cols: cols > 0 ? cols : 120, rows: rows > 0 ? rows : 32,
+    cwd: resolved,
     env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
   });
-  ptyProc.onData(d => {
-    scrollback = (scrollback + d).slice(-SCROLLBACK_MAX);
-    broadcastTerm({ type: 'data', data: d });
+  const sess = { pty: proc, cwd: resolved, args, scrollback: '', status: 'running', pid: proc.pid, createdAt: Date.now() };
+  sessions.set(sid, sess);
+  proc.onData(d => {
+    sess.scrollback = (sess.scrollback + d).slice(-SCROLLBACK_MAX);
+    broadcastTerm({ type: 'data', sid, data: d });
   });
-  ptyProc.onExit(({ exitCode }) => {
-    ptyProc = null;
-    broadcastTerm({ type: 'exit', code: exitCode });
+  proc.onExit(({ exitCode }) => {
+    sess.status = 'exited';
+    broadcastTerm({ type: 'exit', sid, code: exitCode });
     broadcastEvent({ type: 'state' });
   });
-  broadcastTerm({ type: 'started', pid: ptyProc.pid, args });
+  broadcastTerm({ type: 'session-started', session: sessionInfo(sid, sess) });
   broadcastEvent({ type: 'state' });
+  return sid;
 }
 
-function stopClaude() {
-  if (ptyProc) {
-    try { ptyProc.kill(); } catch {}
-    ptyProc = null;
+function killSession(sid, remove = false) {
+  const s = sessions.get(sid);
+  if (!s) return;
+  if (s.status === 'running') {
+    try { s.pty.kill(); } catch {}
+    s.status = 'exited';
   }
+  if (remove) sessions.delete(sid);
 }
 
 // ---------------------------------------------------------------------------
@@ -477,8 +571,10 @@ app.post('/api/mcp', (req, res) => {
 
 app.get('/api/session', (req, res) => {
   const id = String(req.query.id || '');
+  const project = String(req.query.project || cwd);
   if (!/^[\w-]+$/.test(id)) return res.status(400).json({ error: 'bad session id' });
-  try { res.json({ messages: readTranscript(id) }); }
+  if (!knownProjectPaths().has(project)) return res.status(403).json({ error: 'unknown project' });
+  try { res.json({ messages: readTranscript(id, project) }); }
   catch (e) { res.status(404).json({ error: String(e.message) }); }
 });
 
@@ -555,28 +651,33 @@ server.on('upgrade', (req, socket, head) => {
 wssTerm.on('connection', ws => {
   termClients.add(ws);
   ws.on('close', () => termClients.delete(ws));
-  if (ptyProc) {
-    ws.send(JSON.stringify({ type: 'started', pid: ptyProc.pid, args: lastArgs, replay: true }));
-    if (scrollback) ws.send(JSON.stringify({ type: 'data', data: scrollback }));
-  }
+  // tell the new client what's alive; it asks for replay per session it doesn't have
+  ws.send(JSON.stringify({ type: 'sessions', sessions: sessionList() }));
   ws.on('message', raw => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
+    const s = msg.sid ? sessions.get(msg.sid) : null;
     switch (msg.type) {
+      case 'start':
+        try { startSession(msg); }
+        catch (e) { ws.send(JSON.stringify({ type: 'error', message: String(e.message) })); }
+        break;
+      case 'replay':
+        if (s) ws.send(JSON.stringify({ type: 'data', sid: msg.sid, data: s.scrollback }));
+        break;
       case 'input':
-        if (ptyProc) ptyProc.write(msg.data);
+        if (s?.status === 'running') s.pty.write(msg.data);
         break;
       case 'resize':
-        if (ptyProc && msg.cols > 0 && msg.rows > 0) {
-          try { ptyProc.resize(msg.cols, msg.rows); } catch {}
+        if (s?.status === 'running' && msg.cols > 0 && msg.rows > 0) {
+          try { s.pty.resize(msg.cols, msg.rows); } catch {}
         }
         break;
-      case 'start':
-        startClaude({ args: Array.isArray(msg.args) ? msg.args.map(String) : [], cols: msg.cols, rows: msg.rows });
-        break;
       case 'stop':
-        stopClaude();
-        broadcastTerm({ type: 'exit', code: null });
+        killSession(msg.sid);
+        break;
+      case 'close':
+        killSession(msg.sid, true);
         broadcastEvent({ type: 'state' });
         break;
     }

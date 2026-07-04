@@ -90,7 +90,7 @@ async function mutate(promise, okMsg = 'Saved') {
 // ---------------------------------------------------------------------------
 // terminal
 // ---------------------------------------------------------------------------
-const term = new Terminal({
+const TERM_OPTS = {
   fontFamily: '"JetBrains Mono", "SF Mono", Menlo, Consolas, monospace',
   fontSize: 13,
   cursorBlink: true,
@@ -105,97 +105,196 @@ const term = new Terminal({
     brightYellow: '#FACC15', brightBlue: '#93C5FD', brightMagenta: '#D8B4FE',
     brightCyan: '#67E8F9', brightWhite: '#FFFFFF',
   },
-});
-const fit = new FitAddon.FitAddon();
-term.loadAddon(fit);
-term.open($('#terminal'));
+};
 
+// Multiple concurrent sessions, one xterm instance per tab
 let termWs = null;
-let running = false;
-let termHintShown = false;
+const terms = new Map(); // sid -> { term, fit, div, info }
+let activeSid = null;
 
-// empty-state guidance instead of a blank black pane
-function showTermHint() {
-  termHintShown = true;
-  term.write('\x1b[90m  Claude is not running.\r\n  Press \x1b[0m\x1b[32m▶ Start\x1b[0m\x1b[90m above to launch it here, ⏩ Continue to pick up your last session,\r\n  or open the Conversations tab to resume an older one.\x1b[0m\r\n');
+function wsSend(m) { if (termWs?.readyState === 1) termWs.send(JSON.stringify(m)); }
+
+const shortDir = p => (p || '').split('/').pop() || p || '?';
+
+function ensureTerm(info) {
+  const existing = terms.get(info.sid);
+  if (existing) { existing.info = { ...existing.info, ...info }; return { t: existing, isNew: false }; }
+  const div = el('div', { class: 'term-instance', style: 'display:none' });
+  $('#terminal').append(div);
+  const term = new Terminal(TERM_OPTS);
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(div);
+  term.onData(d => wsSend({ type: 'input', sid: info.sid, data: d }));
+  const t = { term, fit, div, info };
+  terms.set(info.sid, t);
+  updateEmptyState();
+  return { t, isNew: true };
 }
-setTimeout(() => { if (!running && !termHintShown) showTermHint(); }, 600);
+
+function removeTerm(sid) {
+  const t = terms.get(sid);
+  if (!t) return;
+  t.term.dispose();
+  t.div.remove();
+  terms.delete(sid);
+  if (activeSid === sid) {
+    activeSid = null;
+    const rest = [...terms.keys()];
+    if (rest.length) activateSession(rest[rest.length - 1]);
+  }
+  updateEmptyState();
+  renderSessionTabs();
+  setStatus();
+}
+
+function updateEmptyState() {
+  $('#term-empty').style.display = terms.size ? 'none' : '';
+}
+
+function activateSession(sid) {
+  const t = terms.get(sid);
+  if (!t) return;
+  activeSid = sid;
+  for (const [id, other] of terms) other.div.style.display = id === sid ? '' : 'none';
+  requestAnimationFrame(() => {
+    t.fit.fit();
+    wsSend({ type: 'resize', sid, cols: t.term.cols, rows: t.term.rows });
+    t.term.focus();
+  });
+  renderSessionTabs();
+  setStatus();
+  // the dashboard (config, git, "this project" chats) follows the active session
+  if (t.info?.cwd && state && t.info.cwd !== state.cwd) {
+    api('POST', '/api/cwd', { cwd: t.info.cwd }).then(refreshState).catch(() => {});
+  }
+}
+
+function renderSessionTabs() {
+  const bar = $('#session-tabs');
+  const tabs = [...terms.entries()].map(([sid, t]) => {
+    const info = t.info || {};
+    const dead = info.status === 'exited';
+    const flavor = info.args?.includes('--continue') ? '⏩ ' : info.args?.includes('--resume') ? '⟲ ' : '';
+    return el('div', {
+      class: 'sess-tab' + (sid === activeSid ? ' active' : '') + (dead ? ' dead' : ''),
+      title: `${info.cwd || ''}${info.args?.length ? '\nclaude ' + info.args.join(' ') : ''}`,
+      ...press(() => activateSession(sid), `Switch to session in ${shortDir(info.cwd)}`),
+    },
+      el('span', { class: 'sess-dot' + (dead ? ' off' : '') }),
+      el('span', { class: 'sess-label' }, `${flavor}${shortDir(info.cwd)}`),
+      el('button', {
+        class: 'sess-close', 'aria-label': 'Close session in ' + shortDir(info.cwd),
+        title: dead ? 'Remove tab' : 'Kill this session and close the tab',
+        onclick: e => { e.stopPropagation(); closeSession(sid); },
+      }, '✕'),
+    );
+  });
+  setChildren(bar, tabs, el('button', {
+    class: 'sess-new',
+    title: 'New Claude session in ' + (state?.cwd || 'the current project'),
+    onclick: () => startClaude(),
+  }, '+ New'));
+}
+
+function closeSession(sid) {
+  const t = terms.get(sid);
+  if (!t) return;
+  const running = t.info?.status !== 'exited';
+  if (running && !confirm(`Kill the Claude session in ${shortDir(t.info?.cwd)}? Its conversation stays resumable from the Conversations tab.`)) return;
+  wsSend({ type: 'close', sid });
+  removeTerm(sid);
+}
 
 function connectTerm() {
   termWs = new WebSocket(`ws://${location.host}/ws/term`);
-  termWs.onopen = () => sendResize();
   termWs.onmessage = ev => {
-    const msg = JSON.parse(ev.data);
-    if (msg.type === 'data') term.write(msg.data);
-    else if (msg.type === 'started') {
-      running = true;
-      term.reset();
-      termHintShown = false;
-      setStatus(true, msg.pid, msg.args);
-    } else if (msg.type === 'exit') {
-      running = false;
-      setStatus(false);
-      term.write(`\r\n\x1b[90m[claude exited${msg.code != null ? ' with code ' + msg.code : ''} — press Start to relaunch]\x1b[0m\r\n`);
+    const m = JSON.parse(ev.data);
+    switch (m.type) {
+      case 'sessions': {
+        for (const info of m.sessions) {
+          const { isNew } = ensureTerm(info);
+          if (isNew) wsSend({ type: 'replay', sid: info.sid });
+        }
+        if (!activeSid && m.sessions.length) activateSession(m.sessions[m.sessions.length - 1].sid);
+        renderSessionTabs();
+        setStatus();
+        break;
+      }
+      case 'session-started':
+        ensureTerm(m.session);
+        activateSession(m.session.sid);
+        break;
+      case 'data':
+        terms.get(m.sid)?.term.write(m.data);
+        break;
+      case 'exit': {
+        const t = terms.get(m.sid);
+        if (t) {
+          t.info.status = 'exited';
+          t.term.write(`\r\n\x1b[90m[claude exited${m.code != null ? ' with code ' + m.code : ''} — close the tab or resume from Conversations]\x1b[0m\r\n`);
+          renderSessionTabs();
+          setStatus();
+        }
+        break;
+      }
+      case 'error':
+        toast(m.message, true);
+        break;
     }
   };
   termWs.onclose = () => {
-    running = false;
-    setStatus(false);
+    setStatus();
     setTimeout(connectTerm, 1500);
   };
 }
 connectTerm();
 
-term.onData(d => {
-  if (termWs?.readyState === 1) termWs.send(JSON.stringify({ type: 'input', data: d }));
-});
-
 function sendResize() {
-  fit.fit();
-  if (termWs?.readyState === 1) {
-    termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-  }
+  const t = activeSid && terms.get(activeSid);
+  if (!t) return;
+  t.fit.fit();
+  wsSend({ type: 'resize', sid: activeSid, cols: t.term.cols, rows: t.term.rows });
 }
 new ResizeObserver(() => sendResize()).observe($('#terminal'));
 
-function setStatus(on, pid, args) {
-  $('#status-dot').className = 'dot ' + (on ? 'on' : 'off');
-  $('#status-text').textContent = on
-    ? `running (pid ${pid ?? '?'}${args?.length ? ' · ' + args.join(' ') : ''})`
-    : 'stopped';
+function setStatus() {
+  const n = [...terms.values()].filter(t => t.info?.status !== 'exited').length;
+  $('#status-dot').className = 'dot ' + (n ? 'on' : 'off');
+  $('#status-text').textContent = n ? `${n} session${n === 1 ? '' : 's'} running` : 'no sessions';
 }
 
-function startClaude(extra = []) {
-  if (running && !confirm('Claude is already running — kill the current session and start a new one?')) return;
+// start a NEW session tab; never touches the ones already running
+function startClaude(extra = [], cwdOverride = null) {
   const args = [...extra];
   if ($('#flag-skip').checked) args.push('--dangerously-skip-permissions');
   const typed = $('#extra-args').value.trim();
   if (typed) args.push(...typed.split(/\s+/));
-  fit.fit();
-  termWs.send(JSON.stringify({ type: 'start', args, cols: term.cols, rows: term.rows }));
-  term.focus();
+  wsSend({ type: 'start', cwd: cwdOverride || state?.cwd, args, cols: 120, rows: 32 });
 }
 
 $('#btn-start').onclick = () => startClaude();
 $('#btn-continue').onclick = () => startClaude(['--continue']);
 $('#btn-stop').onclick = () => {
-  if (!running) { toast('Nothing is running'); return; }
-  if (confirm('Kill the running claude process?')) termWs.send(JSON.stringify({ type: 'stop' }));
+  const t = activeSid && terms.get(activeSid);
+  if (!t || t.info?.status === 'exited') { toast('The active tab has no running session'); return; }
+  if (confirm(`Kill the Claude session in ${shortDir(t.info?.cwd)}?`)) wsSend({ type: 'stop', sid: activeSid });
 };
 
-// type a command into the claude prompt and press enter
+// type a command into the active session's prompt and press enter
 let sendBusy = false;
 function sendCommand(cmd) {
-  if (!running) { toast('Claude is not running — press Start first', true); return; }
+  const t = activeSid && terms.get(activeSid);
+  if (!t || t.info?.status === 'exited') { toast('No running session in the active tab — press Start first', true); return; }
   if (sendBusy) { toast('One command at a time — wait a beat', true); return; }
   sendBusy = true;
   // Ctrl+U clears anything already typed so commands never concatenate
-  termWs.send(JSON.stringify({ type: 'input', data: '\x15' + cmd }));
+  wsSend({ type: 'input', sid: activeSid, data: '\x15' + cmd });
   setTimeout(() => {
-    termWs.send(JSON.stringify({ type: 'input', data: '\r' }));
+    wsSend({ type: 'input', sid: activeSid, data: '\r' });
     sendBusy = false;
   }, 450);
-  term.focus();
+  t.term.focus();
 }
 
 // ---------------------------------------------------------------------------
@@ -357,83 +456,34 @@ function renderDash() {
   );
 }
 
-// --- commands (all built-ins + your custom commands & skills) ---
-const BUILTIN_COMMANDS = [
-  // session
-  ['/clear', 'Clear conversation history', 'Session'],
-  ['/compact', 'Compact conversation to save context', 'Session'],
-  ['/context', 'Show context window usage', 'Session'],
-  ['/cost', 'Show token/cost usage for this session', 'Session'],
-  ['/usage', 'Show plan usage limits', 'Session'],
-  ['/resume', 'Pick a past session to resume', 'Session'],
-  ['/rewind', 'Rewind conversation / restore code checkpoint', 'Session'],
-  ['/export', 'Export conversation to file or clipboard', 'Session'],
-  ['/todos', 'Show current todo list', 'Session'],
-  ['/tasks', 'List background tasks', 'Session'],
-  ['/exit', 'Exit Claude', 'Session'],
-  // config
-  ['/config', 'Open the settings panel', 'Config'],
-  ['/model', 'Change the model', 'Config'],
-  ['/effort', 'Change reasoning effort', 'Config'],
-  ['/permissions', 'View & manage tool permissions', 'Config'],
-  ['/output-style', 'Set output style', 'Config'],
-  ['/statusline', 'Configure the status line', 'Config'],
-  ['/keybindings', 'Customize keyboard shortcuts', 'Config'],
-  ['/theme', 'Change color theme', 'Config'],
-  ['/vim', 'Toggle vim editing mode', 'Config'],
-  ['/terminal-setup', 'Configure Shift+Enter newlines', 'Config'],
-  ['/privacy-settings', 'View privacy settings', 'Config'],
-  // project & tools
-  ['/init', 'Generate a CLAUDE.md for this repo', 'Project'],
-  ['/memory', 'Edit memory files (CLAUDE.md)', 'Project'],
-  ['/add-dir', 'Add a working directory', 'Project'],
-  ['/mcp', 'Manage MCP server connections', 'Project'],
-  ['/agents', 'Manage custom agents', 'Project'],
-  ['/hooks', 'Manage hooks', 'Project'],
-  ['/plugins', 'Manage plugins', 'Project'],
-  ['/sandbox', 'Manage sandbox settings', 'Project'],
-  ['/ide', 'Connect to an IDE', 'Project'],
-  ['/install-github-app', 'Set up Claude GitHub Actions', 'Project'],
-  ['/pr-comments', 'View PR comments', 'Project'],
-  ['/review', 'Review a pull request', 'Project'],
-  ['/security-review', 'Security review of pending changes', 'Project'],
-  // info & account
-  ['/help', 'Show help and all commands', 'Info'],
-  ['/status', 'Show version, model, account, connectivity', 'Info'],
-  ['/doctor', 'Diagnose installation issues', 'Info'],
-  ['/release-notes', 'View release notes', 'Info'],
-  ['/bug', 'Report a bug to Anthropic', 'Info'],
-  ['/login', 'Switch Anthropic account', 'Info'],
-  ['/logout', 'Sign out', 'Info'],
-  ['/upgrade', 'Upgrade your plan', 'Info'],
-  ['/migrate-installer', 'Migrate to local installation', 'Info'],
-];
-
+// --- commands: extracted live from your installed claude binary ---
 function cardQuick() {
+  const builtins = state.builtinCommands || [];
+  const custom = (state.commands || []).map(c => ({ name: c.name, description: c.description || 'custom command', source: c.scope }));
+  const skills = (state.skills || []).map(c => ({ name: c.name, description: c.description || 'skill', source: 'skill' }));
+
   const filter = el('input', {
-    type: 'text', placeholder: '🔍 filter commands…',
+    type: 'search', placeholder: '🔍 filter commands…', 'aria-label': 'Filter commands',
     oninput: () => applyFilter(filter.value.trim().toLowerCase()),
   });
-  const chip = (cmd, desc) => el('button', {
-    class: 'chip', title: desc, 'data-cmd': cmd + ' ' + desc.toLowerCase(),
-    onclick: () => sendCommand(cmd),
-  }, cmd);
 
-  const groups = {};
-  for (const [cmd, desc, group] of BUILTIN_COMMANDS) (groups[group] ??= []).push(chip(cmd, desc));
-  const custom = (state.commands || []).map(c => chip('/' + c.name, c.description || `custom command (${c.scope})`));
-  const skills = (state.skills || []).map(s => chip('/' + s.name, s.description || `skill (${s.scope})`));
+  const row = (name, desc, source) => el('div', {
+    class: 'cmd-row', 'data-cmd': (name + ' ' + desc).toLowerCase(),
+    ...press(() => sendCommand('/' + name), `Run /${name}`),
+  },
+    el('code', { class: 'cmd-name' }, '/' + name),
+    el('span', { class: 'cmd-desc' }, desc),
+    source ? el('span', { class: 'badge ' + (source === 'skill' ? 'local' : source) }, source) : null,
+  );
 
   const sections = [
-    ...Object.entries(groups).map(([g, chips]) => [g, chips]),
-    custom.length ? ['Your commands', custom] : null,
-    skills.length ? ['Your skills', skills] : null,
+    ['Built-in · from your claude ' + (state.claudeVersion || '').split(' ')[0], builtins.map(c => row(c.name, c.description))],
+    custom.length ? ['Your commands', custom.map(c => row(c.name, c.description, c.source))] : null,
+    skills.length ? ['Your skills', skills.map(c => row(c.name, c.description, 'skill'))] : null,
   ].filter(Boolean);
 
-  const body = sections.map(([g, chips]) => [
-    el('div', { class: 'subhead', 'data-group': '' }, g),
-    el('div', { class: 'chips' }, chips),
-  ]);
+  const noResults = el('div', { class: 'empty', style: 'display:none' },
+    'No matching commands — try a shorter word, or run it directly in the terminal');
 
   const keys = el('div', { class: 'chips' },
     el('button', { class: 'chip', title: 'Send Escape key', onclick: () => termWs.send(JSON.stringify({ type: 'input', data: '\x1b' })) }, 'Esc'),
@@ -441,25 +491,25 @@ function cardQuick() {
     el('button', { class: 'chip', title: 'Cycle permission modes', onclick: () => termWs.send(JSON.stringify({ type: 'input', data: '\x1b[Z' })) }, 'Shift+Tab'),
   );
 
-  const noResults = el('div', { class: 'empty', style: 'display:none' },
-    'No matching commands — try a shorter word, or run it directly in the terminal');
-  const wrap = card('quick', '⚡ Commands', BUILTIN_COMMANDS.length + custom.length + skills.length,
-    el('div', { class: 'hint' }, 'Click to run inside the live Claude session — hover for what it does'),
+  const wrap = card('quick', '⚡ Commands', builtins.length + custom.length + skills.length,
+    el('div', { class: 'hint' }, 'Everything your Claude can do, extracted from the binary itself — click to run it in the live session'),
+    builtins.length ? null : el('div', { class: 'empty' }, 'Command list not extracted yet — the server scans the claude binary shortly after startup; this fills in automatically'),
     el('div', { class: 'row' }, filter),
-    body, noResults, el('div', { class: 'subhead' }, 'Keys'), keys,
+    sections.map(([g, rows]) => [el('div', { class: 'subhead', 'data-group': '' }, g), el('div', { class: 'cmd-list' }, rows)]),
+    noResults, el('div', { class: 'subhead' }, 'Keys'), keys,
   );
 
   function applyFilter(q) {
     let shown = 0;
-    for (const c of wrap.querySelectorAll('.chip[data-cmd]')) {
-      const vis = !q || c.getAttribute('data-cmd').includes(q);
-      c.style.display = vis ? '' : 'none';
+    for (const r of wrap.querySelectorAll('.cmd-row')) {
+      const vis = !q || r.getAttribute('data-cmd').includes(q);
+      r.style.display = vis ? '' : 'none';
       if (vis) shown++;
     }
     for (const h of wrap.querySelectorAll('[data-group]')) {
-      const grid = h.nextElementSibling;
-      const any = [...grid.children].some(c => c.style.display !== 'none');
-      h.style.display = grid.style.display = any ? '' : 'none';
+      const list = h.nextElementSibling;
+      const any = [...list.children].some(c => c.style.display !== 'none');
+      h.style.display = list.style.display = any ? '' : 'none';
     }
     noResults.style.display = shown ? 'none' : '';
   }
@@ -698,27 +748,73 @@ function cardMemory() {
 }
 
 // ---------------------------------------------------------------------------
-// Conversations tab
+// Conversations tab — across all your projects
 // ---------------------------------------------------------------------------
 let openTranscriptId = null;
+let chatScope = localStorage.getItem('chatScope') || 'all';
+
+const projName = p => p === state.home ? '~' : p.split('/').pop();
+
+function resumeSession(s) {
+  // opens in a NEW tab in that project; running sessions are untouched
+  startClaude(['--resume', s.id], s.project || state.cwd);
+}
 
 function renderChats() {
   const pane = $('#tab-chats');
   if (openTranscriptId) return; // don't clobber an open transcript on refresh
-  const sessions = state?.sessions || [];
-  setChildren(pane,
-    el('div', { class: 'hint' }, `Past Claude sessions in ${state.cwd.replace(state.home, '~')} — click to read, Resume to reopen`),
-    sessions.length ? sessions.map(s => el('div', {
-      class: 'list-item clickable', ...press(() => openTranscript(s), `Read conversation: ${s.summary || s.id}`),
+  const all = chatScope === 'all';
+  const sessions = (all ? state?.allSessions || state?.sessions : state?.sessions) || [];
+
+  const scopeBtn = (key, label) => el('button', {
+    class: 'seg' + (chatScope === key ? ' active' : ''),
+    'aria-pressed': String(chatScope === key),
+    onclick: () => { chatScope = key; localStorage.setItem('chatScope', key); renderChats(); },
+  }, label);
+
+  // one group per project, projects ordered by most recent activity
+  const ordered = all
+    ? [...sessions].sort((a, b) => {
+        const pa = a.project || state.cwd, pb = b.project || state.cwd;
+        if (pa === pb) return b.mtime - a.mtime;
+        const newest = p => Math.max(...sessions.filter(s => (s.project || state.cwd) === p).map(s => s.mtime));
+        return newest(pb) - newest(pa);
+      })
+    : sessions;
+
+  const rows = [];
+  let lastProj = null;
+  for (const s of ordered) {
+    const proj = s.project || state.cwd;
+    if (all && proj !== lastProj) {
+      lastProj = proj;
+      rows.push(el('div', { class: 'subhead proj-head' },
+        `📁 ${projName(proj)}`,
+        el('span', { class: 'proj-path' }, ' ' + proj.replace(state.home, '~')),
+        proj === state.cwd ? el('span', { class: 'badge project' }, 'current') : null,
+      ));
+    }
+    rows.push(el('div', {
+      class: 'list-item clickable',
+      ...press(() => openTranscript(s), `Read conversation: ${s.summary || s.id}`),
     },
       el('span', { class: 'grow' },
         el('div', {}, s.summary || s.id.slice(0, 8)),
-        el('div', { class: 'sub', title: new Date(s.mtime).toLocaleString() }, `${relTime(s.mtime)} · ${(s.size / 1024).toFixed(0)} KB · ${s.id.slice(0, 8)}`)),
+        el('div', { class: 'sub', title: new Date(s.mtime).toLocaleString() },
+          `${relTime(s.mtime)} · ${(s.size / 1024).toFixed(0)} KB · ${s.id.slice(0, 8)}`)),
       el('button', {
-        class: 'tiny', title: 'claude --resume ' + s.id,
-        onclick: ev => { ev.stopPropagation(); startClaude(['--resume', s.id]); },
+        class: 'tiny', title: (s.project && s.project !== state.cwd ? `Switches cwd to ${projName(s.project)}, then ` : '') + 'claude --resume ' + s.id,
+        onclick: ev => { ev.stopPropagation(); resumeSession(s); },
       }, 'Resume'),
-    )) : el('div', { class: 'empty' }, 'No past sessions for this directory'),
+    ));
+  }
+
+  setChildren(pane,
+    el('div', { class: 'seg-row' }, scopeBtn('all', '🌍 All projects'), scopeBtn('this', '📁 This project')),
+    el('div', { class: 'hint' }, all
+      ? 'Every conversation Claude knows about, newest first — Resume jumps projects for you'
+      : `Conversations in ${state.cwd.replace(state.home, '~')}`),
+    rows.length ? rows : el('div', { class: 'empty' }, 'No sessions found — start one with ▶ Start'),
   );
 }
 
@@ -728,7 +824,8 @@ async function openTranscript(s) {
   pane.replaceChildren(el('div', { class: 'empty' }, 'Loading transcript…'));
   let messages;
   try {
-    ({ messages } = await api('GET', '/api/session?id=' + encodeURIComponent(s.id)));
+    const q = '/api/session?id=' + encodeURIComponent(s.id) + (s.project ? '&project=' + encodeURIComponent(s.project) : '');
+    ({ messages } = await api('GET', q));
   } catch (e) {
     toast(e.message, true);
     openTranscriptId = null;
@@ -738,8 +835,8 @@ async function openTranscript(s) {
   setChildren(pane,
     el('div', { class: 'back-row' },
       el('button', { class: 'tiny', onclick: () => { openTranscriptId = null; renderChats(); } }, '← Back'),
-      el('span', { class: 'grow sub' }, s.summary || s.id.slice(0, 8)),
-      el('button', { class: 'tiny primary', onclick: () => startClaude(['--resume', s.id]) }, 'Resume'),
+      el('span', { class: 'grow sub' }, (s.project ? projName(s.project) + ' · ' : '') + (s.summary || s.id.slice(0, 8))),
+      el('button', { class: 'tiny primary', onclick: () => resumeSession(s) }, 'Resume'),
     ),
     messages.length ? messages.map(m => el('div', { class: 'msg ' + m.role },
       el('div', { class: 'who' }, m.role === 'user' ? 'You' : 'Claude'),
@@ -752,6 +849,14 @@ async function openTranscript(s) {
 // ---------------------------------------------------------------------------
 // Git tab
 // ---------------------------------------------------------------------------
+const GIT_STATUS_LABEL = { M: ['mod', 'yellow'], A: ['new', 'green'], D: ['del', 'red'], R: ['ren', 'blue'], C: ['cpy', 'blue'], U: ['conflict', 'red'], '?': ['new', 'green'] };
+
+function statusChip(code) {
+  const c = code.trim()[0] || 'M';
+  const [label, color] = GIT_STATUS_LABEL[c] || ['?', 'muted'];
+  return el('span', { class: 'git-chip git-' + color, title: `status: ${code}` }, label);
+}
+
 async function renderGit() {
   const pane = $('#tab-git');
   if (!pane.children.length) pane.replaceChildren(el('div', { class: 'empty' }, 'Reading git…'));
@@ -763,26 +868,38 @@ async function renderGit() {
     return;
   }
   setChildren(pane,
-    el('div', { class: 'row' },
-      el('span', { class: 'kv' }, el('span', { class: 'k' }, 'branch '), g.branch),
+    el('div', { class: 'git-header' },
+      el('span', { class: 'git-branch' }, ' ', g.branch || '(no branch)'),
+      g.status.length
+        ? el('span', { class: 'badge ask' }, `${g.status.length} changed`)
+        : el('span', { class: 'badge allow' }, 'clean'),
       el('span', { class: 'spacer' }),
       el('button', { class: 'tiny', onclick: renderGit }, '↻ Refresh'),
     ),
-    g.remote ? el('div', { class: 'kv sub', style: 'margin-bottom:8px' }, el('span', { class: 'k' }, 'remote '), g.remote) : null,
-    el('div', { class: 'subhead' }, `Working tree (${g.status.length} changed)`),
-    g.status.length ? g.status.map(sLine => el('div', { class: 'kv git-status-line' },
-      el('span', { class: 'k' }, sLine.code), sLine.file,
-    )) : el('div', { class: 'empty' }, 'clean'),
-    el('div', { class: 'subhead' }, `History (${g.log.length})`),
-    g.log.length ? g.log.map(c => el('div', {
-      class: 'list-item clickable commit', title: 'Show diff',
+    g.remote ? el('div', { class: 'git-remote', title: g.remote }, g.remote) : null,
+
+    g.status.length ? [
+      el('div', { class: 'subhead' }, 'Working tree'),
+      el('div', { class: 'git-files' }, g.status.map(f => el('div', { class: 'git-file' },
+        statusChip(f.code),
+        el('span', { class: 'git-filename', title: f.file }, f.file),
+      ))),
+    ] : null,
+
+    el('div', { class: 'subhead' }, `History · ${g.log.length} commit${g.log.length === 1 ? '' : 's'}`),
+    g.log.length ? el('div', { class: 'git-commits' }, g.log.map(c => el('div', {
+      class: 'commit',
       ...press(() => openCommit(c), `Show diff for ${c.hash} ${c.subject}`),
     },
-      el('span', { class: 'grow' },
-        el('div', {}, el('span', { class: 'hash' }, c.hash), ' ', c.subject,
-          c.refs ? el('span', { class: 'refs' }, '  (' + c.refs + ')') : null),
-        el('div', { class: 'sub' }, `${c.author} · ${c.date}`)),
-    )) : el('div', { class: 'empty' }, 'No commits yet'),
+      el('div', { class: 'commit-line' },
+        el('code', { class: 'hash' }, c.hash),
+        el('span', { class: 'commit-subject' }, c.subject),
+      ),
+      el('div', { class: 'commit-meta' },
+        `${c.author} · ${c.date}`,
+        c.refs ? c.refs.split(',').map(r => el('span', { class: 'ref-pill' }, r.trim())) : null,
+      ),
+    ))) : el('div', { class: 'empty' }, 'No commits yet — ask Claude to make the first one'),
   );
 }
 

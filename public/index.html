@@ -46,13 +46,20 @@
 
     <section id="term-pane">
       <div id="term-toolbar">
-        <button id="btn-start" class="primary">▶ Start</button>
-        <button id="btn-continue" title="claude --continue">⏩ Continue</button>
-        <button id="btn-stop" class="danger" title="Kill the claude process">■ Stop</button>
+        <button id="btn-start" class="primary" title="Start a new session tab — running sessions are untouched">▶ Start</button>
+        <button id="btn-continue" title="Open your last conversation in a new tab (claude --continue)">⏩ Continue</button>
+        <button id="btn-stop" class="danger" title="Kill the session in the active tab">■ Stop</button>
         <label class="flag"><input type="checkbox" id="flag-skip"> --dangerously-skip-permissions</label>
         <input id="extra-args" placeholder="extra CLI args…" aria-label="Extra CLI arguments" spellcheck="false">
       </div>
-      <div id="terminal"></div>
+      <div id="session-tabs" role="tablist" aria-label="Claude sessions"></div>
+      <div id="terminal">
+        <div id="term-empty">
+          <div>No Claude sessions yet.</div>
+          <div>▶ <b>Start</b> opens one here · ⏩ <b>Continue</b> picks up your last conversation</div>
+          <div>Each session gets its own tab — switching never kills the others.</div>
+        </div>
+      </div>
     </section>
   </main>
 

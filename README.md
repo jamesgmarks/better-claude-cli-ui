@@ -43,9 +43,11 @@ Options:
 
 The panel is **live**: file watchers on `~/.claude`, `~/.claude.json`, and the project's `.claude/` push updates over a WebSocket, so changes made from inside Claude (e.g. `/config`, `/permissions`) show up in the dashboard immediately, and vice versa.
 
+**Concurrent sessions:** every Start / Continue / Resume opens a new **session tab** — multiple Claude processes run at once, in different projects, and switching tabs never kills anything. Resume from the Conversations tab opens that conversation in a new tab in its own project. The dashboard (config, git, sessions) follows whichever tab is active. Stop / ✕ kill only that tab's session, always with confirmation, and the conversation stays resumable from disk.
+
 Terminal toolbar: Start / Continue (`--continue`) / Stop, a `--dangerously-skip-permissions` toggle, and a free-form extra-args field.
 
-> Settings file edits apply to **new** Claude sessions — restart the session (Stop → Start) to pick them up. Quick commands like `/model` affect the running session directly.
+> Settings file edits apply to **new** Claude sessions — open a new tab to pick them up. Commands like `/model` affect the running session directly.
 
 ## Accessibility & UX
 
