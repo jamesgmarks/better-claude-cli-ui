@@ -303,8 +303,8 @@ function renderSessionTabs() {
   });
   setChildren(bar, tabs, el('button', {
     class: 'sess-new',
-    title: 'New Claude session in ' + (state?.cwd || 'the current project'),
-    onclick: () => startClaude(),
+    title: 'Pick a folder, then start a new Claude session there',
+    onclick: () => openDirPicker('new-session'),
   }, '+ New'));
   updateDocTitle();
 }
@@ -424,7 +424,7 @@ function startClaude(extra = [], cwdOverride = null) {
   wsSend({ type: 'start', cwd: cwdOverride || state?.cwd, args, cols: 120, rows: 32 });
 }
 
-$('#btn-start').onclick = () => startClaude();
+$('#btn-start').onclick = () => openDirPicker('new-session');
 $('#btn-continue').onclick = () => startClaude(['--continue']);
 $('#btn-stop').onclick = () => {
   const t = activeSid && terms.get(activeSid);
@@ -584,6 +584,9 @@ async function applyDeckUpdate(force) {
 // folder picker — the cwd field opens a real directory browser
 // ---------------------------------------------------------------------------
 let dirCurrent = null;
+// 'cwd' just moves the dashboard's working dir; 'new-session' also starts a
+// Claude session in the chosen folder (what the + New tab button uses)
+let dirPickerMode = 'cwd';
 
 async function browseTo(p) {
   let r;
@@ -604,7 +607,9 @@ async function browseTo(p) {
   );
 }
 
-function openDirPicker() {
+function openDirPicker(mode = 'cwd') {
+  dirPickerMode = mode;
+  $('#dir-select').textContent = mode === 'new-session' ? '▶ Use folder & start' : 'Use this folder';
   const shortcuts = [
     { label: '🏠 home', path: state.home },
     ...(state.knownProjects || []).map(p => ({ label: '📁 ' + (p.split('/').pop() || p), path: p })),
@@ -623,9 +628,17 @@ $('#dir-go').onclick = () => browseTo($('#dir-path').value.trim());
 $('#dir-path').addEventListener('keydown', e => { if (e.key === 'Enter') browseTo($('#dir-path').value.trim()); });
 $('#dir-hidden').onchange = () => dirCurrent && browseTo(dirCurrent);
 $('#dir-select').onclick = e => busy(e.currentTarget, async () => {
+  const chosen = dirCurrent;
   try {
-    await api('POST', '/api/cwd', { cwd: dirCurrent });
-    toast('Working directory: ' + dirCurrent);
+    await api('POST', '/api/cwd', { cwd: chosen });
+    if (dirPickerMode === 'new-session') {
+      // pass the folder explicitly so the session starts there regardless of
+      // when the cwd change propagates back through state
+      startClaude([], chosen);
+      toast('New session in ' + chosen);
+    } else {
+      toast('Working directory: ' + chosen);
+    }
     $('#dir-modal').close();
     refreshState();
   } catch (err) { toast(err.message, true); }
