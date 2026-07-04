@@ -132,8 +132,23 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .sess-tab.dead { opacity: .55; }
 .sess-tab:hover { color: var(--text); }
 .sess-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sess-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: 0 0 auto; }
-.sess-dot.off { background: var(--red); }
+
+/* agent state at a glance: pulsing green = working, solid amber = your turn,
+   flashing red + ? = asking you something, grey = exited */
+.sess-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.sess-dot.working { background: var(--green); animation: pulse 1.6s ease-in-out infinite; }
+.sess-dot.ready { background: var(--yellow); box-shadow: 0 0 5px var(--yellow); }
+.sess-dot.question { background: var(--red); animation: urgent 0.9s ease-in-out infinite; }
+.sess-dot.off { background: #64748B; }
+.sess-tab.act-ready { border-color: var(--yellow); }
+.sess-tab.act-question { border-color: var(--red); }
+.sess-ask {
+  background: var(--red); color: #fff; font-weight: 500;
+  border-radius: 8px; padding: 0 6px; font-size: 10px; flex: 0 0 auto;
+  animation: urgent 0.9s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes urgent { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 .sess-close {
   background: none; border: none; color: var(--muted);
   cursor: pointer; padding: 0 3px; min-height: 0; font-size: 12px; border-radius: 4px;

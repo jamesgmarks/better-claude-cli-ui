@@ -222,22 +222,36 @@ function activateSession(sid) {
   }
 }
 
+// agent state → how the tab signals it, at a glance
+const ACTIVITY_UI = {
+  working: { cls: 'working', label: 'working…', hint: 'Claude is working — no action needed' },
+  ready: { cls: 'ready', label: 'your turn', hint: 'Claude is done / idle — waiting on you' },
+  question: { cls: 'question', label: '❓ asking you', hint: 'Claude is asking a question or needs permission' },
+  exited: { cls: 'off', label: 'exited', hint: 'Session ended — ✕ to remove the tab' },
+};
+
+function activityOf(info) {
+  return info.status === 'exited' ? 'exited' : (info.activity || 'working');
+}
+
 function renderSessionTabs() {
   const bar = $('#session-tabs');
   const tabs = [...terms.entries()].map(([sid, t]) => {
     const info = t.info || {};
-    const dead = info.status === 'exited';
+    const act = activityOf(info);
+    const ui = ACTIVITY_UI[act] || ACTIVITY_UI.working;
     const flavor = info.args?.includes('--continue') ? '⏩ ' : info.args?.includes('--resume') ? '⟲ ' : '';
     return el('div', {
-      class: 'sess-tab' + (sid === activeSid ? ' active' : '') + (dead ? ' dead' : ''),
-      title: `${info.cwd || ''}${info.args?.length ? '\nclaude ' + info.args.join(' ') : ''}`,
-      ...press(() => activateSession(sid), `Switch to session in ${shortDir(info.cwd)}`),
+      class: 'sess-tab' + (sid === activeSid ? ' active' : '') + (act === 'exited' ? ' dead' : '') + ' act-' + ui.cls,
+      title: `${ui.hint}\n${info.cwd || ''}${info.args?.length ? '\nclaude ' + info.args.join(' ') : ''}`,
+      ...press(() => activateSession(sid), `Switch to session in ${shortDir(info.cwd)} (${ui.label})`),
     },
-      el('span', { class: 'sess-dot' + (dead ? ' off' : '') }),
+      el('span', { class: 'sess-dot ' + ui.cls, 'aria-hidden': 'true' }),
       el('span', { class: 'sess-label' }, `${flavor}${shortDir(info.cwd)}`),
+      act === 'question' ? el('span', { class: 'sess-ask' }, '?') : null,
       el('button', {
         class: 'sess-close', 'aria-label': 'Close session in ' + shortDir(info.cwd),
-        title: dead ? 'Remove tab' : 'Kill this session and close the tab',
+        title: act === 'exited' ? 'Remove tab' : 'Kill this session and close the tab',
         onclick: e => { e.stopPropagation(); closeSession(sid); },
       }, '✕'),
     );
@@ -247,6 +261,23 @@ function renderSessionTabs() {
     title: 'New Claude session in ' + (state?.cwd || 'the current project'),
     onclick: () => startClaude(),
   }, '+ New'));
+  updateDocTitle();
+}
+
+// browser tab shows what needs you, even when the Deck isn't focused
+function updateDocTitle() {
+  let asking = 0, ready = 0, working = 0;
+  for (const [, t] of terms) {
+    const a = activityOf(t.info || {});
+    if (a === 'question') asking++;
+    else if (a === 'ready') ready++;
+    else if (a === 'working') working++;
+  }
+  const parts = [];
+  if (asking) parts.push(`❓${asking}`);
+  if (ready) parts.push(`🟡${ready}`);
+  if (working) parts.push(`⏳${working}`);
+  document.title = (parts.length ? parts.join(' ') + ' · ' : '') + 'Claude Deck';
 }
 
 function closeSession(sid) {
@@ -290,6 +321,15 @@ function connectTerm() {
         }
         break;
       }
+      case 'activity': {
+        const t = terms.get(m.sid);
+        if (t && t.info.activity !== m.activity) {
+          t.info.activity = m.activity;
+          renderSessionTabs();
+          setStatus();
+        }
+        break;
+      }
       case 'error':
         toast(m.message, true);
         break;
@@ -311,9 +351,13 @@ function sendResize() {
 new ResizeObserver(() => sendResize()).observe($('#terminal'));
 
 function setStatus() {
-  const n = [...terms.values()].filter(t => t.info?.status !== 'exited').length;
+  const live = [...terms.values()].filter(t => t.info?.status !== 'exited');
+  const needsYou = live.filter(t => ['ready', 'question'].includes(t.info?.activity)).length;
+  const n = live.length;
   $('#status-dot').className = 'dot ' + (n ? 'on' : 'off');
-  $('#status-text').textContent = n ? `${n} session${n === 1 ? '' : 's'} running` : 'no sessions';
+  $('#status-text').textContent = n
+    ? `${n} session${n === 1 ? '' : 's'}${needsYou ? ` · ${needsYou} waiting on you` : ''}`
+    : 'no sessions';
 }
 
 // start a NEW session tab; never touches the ones already running

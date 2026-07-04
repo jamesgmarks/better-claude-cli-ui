@@ -474,8 +474,40 @@ function broadcastEvent(msg) {
   for (const ws of eventClients) if (ws.readyState === 1) ws.send(s);
 }
 
-const sessionInfo = (sid, s) => ({ sid, pid: s.pid, cwd: s.cwd, args: s.args, status: s.status, createdAt: s.createdAt });
+const sessionInfo = (sid, s) => ({ sid, pid: s.pid, cwd: s.cwd, args: s.args, status: s.status, activity: s.activity || 'working', createdAt: s.createdAt });
 const sessionList = () => [...sessions.entries()].map(([sid, s]) => sessionInfo(sid, s));
+
+// ---------------------------------------------------------------------------
+// Activity detection: is the agent working, or waiting on the human?
+// Claude's spinner streams output continuously while it works, so a quiet
+// PTY means the ball is in your court. The last visible screen tells us
+// whether it's a question/permission prompt or just an idle prompt.
+// ---------------------------------------------------------------------------
+const stripAnsi = s => s
+  .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')   // OSC (titles etc.)
+  .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')            // CSI
+  .replace(/\x1b[()][0-9A-B]/g, '');                 // charset selects
+
+const QUESTION_RE = /(Do you want|Would you like|Allow this|Allow \w+|Grant access|don't ask again|\(y\/n\)|❯\s*1\.|Choose an option|Press Enter to|Esc to go back|awaiting your|Waiting for your)/i;
+
+function classifyActivity(s) {
+  if (s.status === 'exited') return 'exited';
+  const quiet = Date.now() - (s.lastDataAt || s.createdAt);
+  if (quiet < 2500) return 'working';
+  // only the tail — roughly the currently visible screen, not old scrollback
+  const tail = stripAnsi(s.scrollback.slice(-2000));
+  return QUESTION_RE.test(tail.slice(-1200)) ? 'question' : 'ready';
+}
+
+setInterval(() => {
+  for (const [sid, s] of sessions) {
+    const a = classifyActivity(s);
+    if (a !== s.activity) {
+      s.activity = a;
+      broadcastTerm({ type: 'activity', sid, activity: a });
+    }
+  }
+}, 1000);
 
 function startSession({ cwd: dir, args = [], cols = 120, rows = 32 } = {}) {
   const resolved = path.resolve(String(dir || cwd).replace(/^~(?=\/|$)/, HOME));
@@ -493,6 +525,7 @@ function startSession({ cwd: dir, args = [], cols = 120, rows = 32 } = {}) {
   sessions.set(sid, sess);
   proc.onData(d => {
     sess.scrollback = (sess.scrollback + d).slice(-SCROLLBACK_MAX);
+    sess.lastDataAt = Date.now();
     broadcastTerm({ type: 'data', sid, data: d });
   });
   proc.onExit(({ exitCode }) => {
