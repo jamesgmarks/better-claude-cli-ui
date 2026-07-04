@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Claude Deck</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎛️</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap">
+  <link rel="stylesheet" href="/vendor/xterm/css/xterm.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <h1 class="brand">🎛️ Claude Deck</h1>
+    <div class="topbar-status">
+      <span id="status-dot" class="dot off"></span>
+      <span id="status-text">stopped</span>
+    </div>
+    <div class="cwd-box">
+      <label for="cwd-input">cwd</label>
+      <input id="cwd-input" spellcheck="false">
+      <button id="cwd-set" title="Change working directory">Set</button>
+    </div>
+    <div class="spacer"></div>
+    <span id="acct" class="muted"></span>
+    <span id="version" class="muted"></span>
+  </header>
+
+  <main id="split">
+    <aside id="dash">
+      <nav id="tabs" role="tablist" aria-label="Dashboard sections">
+        <button data-tab="config" class="active" role="tab" aria-selected="true" aria-controls="tab-config">⚙️ Config</button>
+        <button data-tab="chats" role="tab" aria-selected="false" aria-controls="tab-chats">💬 Conversations</button>
+        <button data-tab="git" role="tab" aria-selected="false" aria-controls="tab-git">🌿 Git</button>
+      </nav>
+      <div id="dash-scroll">
+        <div id="tab-config" role="tabpanel" aria-label="Config"><div class="empty">Loading configuration…</div></div>
+        <div id="tab-chats" role="tabpanel" aria-label="Conversations" hidden></div>
+        <div id="tab-git" role="tabpanel" aria-label="Git" hidden></div>
+      </div>
+    </aside>
+
+    <div id="divider" title="Drag to resize (arrow keys when focused)" role="separator" aria-orientation="vertical" aria-label="Resize panels" tabindex="0"></div>
+
+    <section id="term-pane">
+      <div id="term-toolbar">
+        <button id="btn-start" class="primary">▶ Start</button>
+        <button id="btn-continue" title="claude --continue">⏩ Continue</button>
+        <button id="btn-stop" class="danger" title="Kill the claude process">■ Stop</button>
+        <label class="flag"><input type="checkbox" id="flag-skip"> --dangerously-skip-permissions</label>
+        <input id="extra-args" placeholder="extra CLI args…" aria-label="Extra CLI arguments" spellcheck="false">
+      </div>
+      <div id="terminal"></div>
+    </section>
+  </main>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <dialog id="file-modal">
+    <div class="modal-head">
+      <span id="modal-title"></span>
+      <div class="spacer"></div>
+      <button id="modal-save" class="primary">Save</button>
+      <button id="modal-close">Close</button>
+    </div>
+    <textarea id="modal-text" aria-label="File content" spellcheck="false"></textarea>
+  </dialog>
+
+  <script src="/vendor/xterm/lib/xterm.js"></script>
+  <script src="/vendor/addon-fit/lib/addon-fit.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,892 @@
+/* Claude Deck — frontend */
+'use strict';
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+const $ = s => document.querySelector(s);
+
+function el(tag, attrs = {}, ...children) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') n.className = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else if (k === 'title' || k === 'placeholder' || k === 'value' || k === 'type' || k === 'spellcheck') n[k] = v;
+    else n.setAttribute(k, v);
+  }
+  for (const c of children.flat(Infinity)) {
+    if (c == null) continue;
+    n.append(c.nodeType ? c : document.createTextNode(c));
+  }
+  return n;
+}
+
+// replaceChildren that tolerates nested arrays and nulls
+function setChildren(node, ...kids) {
+  node.replaceChildren(...kids.flat(Infinity).filter(Boolean));
+}
+
+// attrs that make a div/span a real keyboard-operable button
+function press(handler, label) {
+  return {
+    role: 'button', tabindex: '0',
+    onclick: handler,
+    onkeydown: e => {
+      if (e.target !== e.currentTarget) return; // don't hijack nested buttons
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handler(e); }
+    },
+    ...(label ? { 'aria-label': label } : {}),
+  };
+}
+
+// disable a button while its async work runs (prevents double-submit)
+async function busy(btn, fn) {
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try { await fn(); } finally { btn.disabled = false; }
+}
+
+// relative time for lists; absolute goes in the title attribute
+function relTime(ms) {
+  const s = (Date.now() - ms) / 1000;
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 7 * 86400) return `${Math.floor(s / 86400)}d ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
+let toastTimer;
+function toast(msg, isError = false) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'show' + (isError ? ' error' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.className = '', isError ? 5000 : 2600);
+}
+
+async function api(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(j.error || res.statusText);
+  return j;
+}
+
+// mutate + toast; the file watcher pushes a refresh, but refresh eagerly too
+async function mutate(promise, okMsg = 'Saved') {
+  try {
+    await promise;
+    toast(okMsg + ' — new sessions pick this up (restart Claude to apply now)');
+    refreshState();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// terminal
+// ---------------------------------------------------------------------------
+const term = new Terminal({
+  fontFamily: '"JetBrains Mono", "SF Mono", Menlo, Consolas, monospace',
+  fontSize: 13,
+  cursorBlink: true,
+  scrollback: 8000,
+  allowProposedApi: true,
+  theme: {
+    background: '#0B1120', foreground: '#F8FAFC', cursor: '#22C55E',
+    selectionBackground: '#334155',
+    black: '#0B1120', red: '#EF4444', green: '#22C55E', yellow: '#EAB308',
+    blue: '#60A5FA', magenta: '#C084FC', cyan: '#22D3EE', white: '#F8FAFC',
+    brightBlack: '#64748B', brightRed: '#F87171', brightGreen: '#4ADE80',
+    brightYellow: '#FACC15', brightBlue: '#93C5FD', brightMagenta: '#D8B4FE',
+    brightCyan: '#67E8F9', brightWhite: '#FFFFFF',
+  },
+});
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open($('#terminal'));
+
+let termWs = null;
+let running = false;
+let termHintShown = false;
+
+// empty-state guidance instead of a blank black pane
+function showTermHint() {
+  termHintShown = true;
+  term.write('\x1b[90m  Claude is not running.\r\n  Press \x1b[0m\x1b[32m▶ Start\x1b[0m\x1b[90m above to launch it here, ⏩ Continue to pick up your last session,\r\n  or open the Conversations tab to resume an older one.\x1b[0m\r\n');
+}
+setTimeout(() => { if (!running && !termHintShown) showTermHint(); }, 600);
+
+function connectTerm() {
+  termWs = new WebSocket(`ws://${location.host}/ws/term`);
+  termWs.onopen = () => sendResize();
+  termWs.onmessage = ev => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'data') term.write(msg.data);
+    else if (msg.type === 'started') {
+      running = true;
+      term.reset();
+      termHintShown = false;
+      setStatus(true, msg.pid, msg.args);
+    } else if (msg.type === 'exit') {
+      running = false;
+      setStatus(false);
+      term.write(`\r\n\x1b[90m[claude exited${msg.code != null ? ' with code ' + msg.code : ''} — press Start to relaunch]\x1b[0m\r\n`);
+    }
+  };
+  termWs.onclose = () => {
+    running = false;
+    setStatus(false);
+    setTimeout(connectTerm, 1500);
+  };
+}
+connectTerm();
+
+term.onData(d => {
+  if (termWs?.readyState === 1) termWs.send(JSON.stringify({ type: 'input', data: d }));
+});
+
+function sendResize() {
+  fit.fit();
+  if (termWs?.readyState === 1) {
+    termWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+  }
+}
+new ResizeObserver(() => sendResize()).observe($('#terminal'));
+
+function setStatus(on, pid, args) {
+  $('#status-dot').className = 'dot ' + (on ? 'on' : 'off');
+  $('#status-text').textContent = on
+    ? `running (pid ${pid ?? '?'}${args?.length ? ' · ' + args.join(' ') : ''})`
+    : 'stopped';
+}
+
+function startClaude(extra = []) {
+  if (running && !confirm('Claude is already running — kill the current session and start a new one?')) return;
+  const args = [...extra];
+  if ($('#flag-skip').checked) args.push('--dangerously-skip-permissions');
+  const typed = $('#extra-args').value.trim();
+  if (typed) args.push(...typed.split(/\s+/));
+  fit.fit();
+  termWs.send(JSON.stringify({ type: 'start', args, cols: term.cols, rows: term.rows }));
+  term.focus();
+}
+
+$('#btn-start').onclick = () => startClaude();
+$('#btn-continue').onclick = () => startClaude(['--continue']);
+$('#btn-stop').onclick = () => {
+  if (!running) { toast('Nothing is running'); return; }
+  if (confirm('Kill the running claude process?')) termWs.send(JSON.stringify({ type: 'stop' }));
+};
+
+// type a command into the claude prompt and press enter
+let sendBusy = false;
+function sendCommand(cmd) {
+  if (!running) { toast('Claude is not running — press Start first', true); return; }
+  if (sendBusy) { toast('One command at a time — wait a beat', true); return; }
+  sendBusy = true;
+  // Ctrl+U clears anything already typed so commands never concatenate
+  termWs.send(JSON.stringify({ type: 'input', data: '\x15' + cmd }));
+  setTimeout(() => {
+    termWs.send(JSON.stringify({ type: 'input', data: '\r' }));
+    sendBusy = false;
+  }, 450);
+  term.focus();
+}
+
+// ---------------------------------------------------------------------------
+// divider drag
+// ---------------------------------------------------------------------------
+$('#divider').addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const dash = $('#dash');
+  const startX = e.clientX, startW = dash.offsetWidth;
+  const move = ev => { dash.style.width = Math.max(320, startW + (ev.clientX - startX)) + 'px'; };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    sendResize();
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+});
+
+// keyboard resize on the divider (it's focusable, role=separator)
+$('#divider').addEventListener('keydown', e => {
+  const dash = $('#dash');
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    e.preventDefault();
+    const delta = e.key === 'ArrowRight' ? 24 : -24;
+    dash.style.width = Math.max(320, dash.offsetWidth + delta) + 'px';
+    sendResize();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// events websocket → live refresh
+// ---------------------------------------------------------------------------
+function connectEvents() {
+  const ws = new WebSocket(`ws://${location.host}/ws/events`);
+  ws.onmessage = ev => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'state') refreshState();
+  };
+  ws.onclose = () => setTimeout(connectEvents, 2000);
+}
+connectEvents();
+
+// ---------------------------------------------------------------------------
+// state + dashboard rendering
+// ---------------------------------------------------------------------------
+let state = null;
+let refreshQueued = false;
+
+async function refreshState() {
+  // don't clobber a form the user is typing in; retry shortly after
+  if (document.activeElement && $('#dash').contains(document.activeElement)) {
+    if (!refreshQueued) {
+      refreshQueued = true;
+      setTimeout(() => { refreshQueued = false; refreshState(); }, 2500);
+    }
+    return;
+  }
+  try {
+    state = await api('GET', '/api/state');
+  } catch (e) {
+    toast('Failed to load state: ' + e.message, true);
+    return;
+  }
+  renderTopbar();
+  renderDash();
+  renderChats();
+  if (activeTab === 'git') renderGit();
+}
+
+// ---------------------------------------------------------------------------
+// tabs
+// ---------------------------------------------------------------------------
+let activeTab = new URLSearchParams(location.search).get('tab') || localStorage.getItem('activeTab') || 'config';
+if (!['config', 'chats', 'git'].includes(activeTab)) activeTab = 'config';
+function switchTab(tab) {
+  activeTab = tab;
+  localStorage.setItem('activeTab', tab);
+  const url = new URL(location);
+  url.searchParams.set('tab', tab);
+  history.replaceState(null, '', url); // deep-linkable tabs
+  for (const b of document.querySelectorAll('#tabs button')) {
+    const active = b.dataset.tab === tab;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-selected', String(active));
+  }
+  for (const t of ['config', 'chats', 'git']) {
+    $('#tab-' + t).hidden = t !== tab;
+  }
+  if (tab === 'git') renderGit();
+}
+for (const b of document.querySelectorAll('#tabs button')) {
+  b.addEventListener('click', () => switchTab(b.dataset.tab));
+}
+switchTab(activeTab);
+
+function renderTopbar() {
+  $('#version').textContent = state.claudeVersion || '';
+  $('#acct').textContent = state.account ? `${state.account.email} · ${state.account.organization ?? ''}` : '';
+  if (document.activeElement !== $('#cwd-input')) $('#cwd-input').value = state.cwd;
+}
+
+$('#cwd-set').onclick = e =>
+  busy(e.currentTarget, () => mutate(api('POST', '/api/cwd', { cwd: $('#cwd-input').value.trim() }), 'Working directory changed'));
+
+// --- card infrastructure (open/closed persisted) ---
+const openCards = new Set(JSON.parse(localStorage.getItem('openCards') || '["quick","core","permissions","mcp"]'));
+function card(id, title, count, ...body) {
+  const open = openCards.has(id);
+  const toggle = () => {
+    const nowOpen = c.classList.toggle('open');
+    nowOpen ? openCards.add(id) : openCards.delete(id);
+    c.firstChild.setAttribute('aria-expanded', String(nowOpen));
+    localStorage.setItem('openCards', JSON.stringify([...openCards]));
+  };
+  const c = el('div', { class: 'card' + (open ? ' open' : '') },
+    el('div', { class: 'card-head', 'aria-expanded': String(open), ...press(toggle) },
+      title, count != null ? el('span', { class: 'count' }, String(count)) : null, el('span', { class: 'chev', 'aria-hidden': 'true' }, '▶')),
+    el('div', { class: 'card-body' }, ...body),
+  );
+  return c;
+}
+
+const badge = scope => el('span', { class: 'badge ' + scope }, scope);
+
+// merged view over settings scopes (managed wins, then local > project > user)
+function scopesOf(key) {
+  const out = [];
+  for (const scope of ['managed', 'local', 'project', 'user']) {
+    const j = state.settings[scope]?.json;
+    if (j && j[key] !== undefined) out.push([scope, j[key]]);
+  }
+  return out;
+}
+function effective(keyPath) {
+  const keys = keyPath.split('.');
+  for (const scope of ['managed', 'local', 'project', 'user']) {
+    let v = state.settings[scope]?.json;
+    for (const k of keys) v = v?.[k];
+    if (v !== undefined) return [scope, v];
+  }
+  return [null, undefined];
+}
+
+function renderDash() {
+  setChildren($('#tab-config'),
+    cardQuick(),
+    cardCore(),
+    cardPermissions(),
+    cardMcp(),
+    cardHooks(),
+    cardEnv(),
+    cardCatalog('agents', '🤖 Agents'),
+    cardCatalog('commands', '⚡ Slash commands'),
+    cardCatalog('skills', '🎯 Skills'),
+    cardMemory(),
+    cardProject(),
+    cardRaw(),
+  );
+}
+
+// --- commands (all built-ins + your custom commands & skills) ---
+const BUILTIN_COMMANDS = [
+  // session
+  ['/clear', 'Clear conversation history', 'Session'],
+  ['/compact', 'Compact conversation to save context', 'Session'],
+  ['/context', 'Show context window usage', 'Session'],
+  ['/cost', 'Show token/cost usage for this session', 'Session'],
+  ['/usage', 'Show plan usage limits', 'Session'],
+  ['/resume', 'Pick a past session to resume', 'Session'],
+  ['/rewind', 'Rewind conversation / restore code checkpoint', 'Session'],
+  ['/export', 'Export conversation to file or clipboard', 'Session'],
+  ['/todos', 'Show current todo list', 'Session'],
+  ['/tasks', 'List background tasks', 'Session'],
+  ['/exit', 'Exit Claude', 'Session'],
+  // config
+  ['/config', 'Open the settings panel', 'Config'],
+  ['/model', 'Change the model', 'Config'],
+  ['/effort', 'Change reasoning effort', 'Config'],
+  ['/permissions', 'View & manage tool permissions', 'Config'],
+  ['/output-style', 'Set output style', 'Config'],
+  ['/statusline', 'Configure the status line', 'Config'],
+  ['/keybindings', 'Customize keyboard shortcuts', 'Config'],
+  ['/theme', 'Change color theme', 'Config'],
+  ['/vim', 'Toggle vim editing mode', 'Config'],
+  ['/terminal-setup', 'Configure Shift+Enter newlines', 'Config'],
+  ['/privacy-settings', 'View privacy settings', 'Config'],
+  // project & tools
+  ['/init', 'Generate a CLAUDE.md for this repo', 'Project'],
+  ['/memory', 'Edit memory files (CLAUDE.md)', 'Project'],
+  ['/add-dir', 'Add a working directory', 'Project'],
+  ['/mcp', 'Manage MCP server connections', 'Project'],
+  ['/agents', 'Manage custom agents', 'Project'],
+  ['/hooks', 'Manage hooks', 'Project'],
+  ['/plugins', 'Manage plugins', 'Project'],
+  ['/sandbox', 'Manage sandbox settings', 'Project'],
+  ['/ide', 'Connect to an IDE', 'Project'],
+  ['/install-github-app', 'Set up Claude GitHub Actions', 'Project'],
+  ['/pr-comments', 'View PR comments', 'Project'],
+  ['/review', 'Review a pull request', 'Project'],
+  ['/security-review', 'Security review of pending changes', 'Project'],
+  // info & account
+  ['/help', 'Show help and all commands', 'Info'],
+  ['/status', 'Show version, model, account, connectivity', 'Info'],
+  ['/doctor', 'Diagnose installation issues', 'Info'],
+  ['/release-notes', 'View release notes', 'Info'],
+  ['/bug', 'Report a bug to Anthropic', 'Info'],
+  ['/login', 'Switch Anthropic account', 'Info'],
+  ['/logout', 'Sign out', 'Info'],
+  ['/upgrade', 'Upgrade your plan', 'Info'],
+  ['/migrate-installer', 'Migrate to local installation', 'Info'],
+];
+
+function cardQuick() {
+  const filter = el('input', {
+    type: 'text', placeholder: '🔍 filter commands…',
+    oninput: () => applyFilter(filter.value.trim().toLowerCase()),
+  });
+  const chip = (cmd, desc) => el('button', {
+    class: 'chip', title: desc, 'data-cmd': cmd + ' ' + desc.toLowerCase(),
+    onclick: () => sendCommand(cmd),
+  }, cmd);
+
+  const groups = {};
+  for (const [cmd, desc, group] of BUILTIN_COMMANDS) (groups[group] ??= []).push(chip(cmd, desc));
+  const custom = (state.commands || []).map(c => chip('/' + c.name, c.description || `custom command (${c.scope})`));
+  const skills = (state.skills || []).map(s => chip('/' + s.name, s.description || `skill (${s.scope})`));
+
+  const sections = [
+    ...Object.entries(groups).map(([g, chips]) => [g, chips]),
+    custom.length ? ['Your commands', custom] : null,
+    skills.length ? ['Your skills', skills] : null,
+  ].filter(Boolean);
+
+  const body = sections.map(([g, chips]) => [
+    el('div', { class: 'subhead', 'data-group': '' }, g),
+    el('div', { class: 'chips' }, chips),
+  ]);
+
+  const keys = el('div', { class: 'chips' },
+    el('button', { class: 'chip', title: 'Send Escape key', onclick: () => termWs.send(JSON.stringify({ type: 'input', data: '\x1b' })) }, 'Esc'),
+    el('button', { class: 'chip', title: 'Send Ctrl+C', onclick: () => termWs.send(JSON.stringify({ type: 'input', data: '\x03' })) }, 'Ctrl+C'),
+    el('button', { class: 'chip', title: 'Cycle permission modes', onclick: () => termWs.send(JSON.stringify({ type: 'input', data: '\x1b[Z' })) }, 'Shift+Tab'),
+  );
+
+  const noResults = el('div', { class: 'empty', style: 'display:none' },
+    'No matching commands — try a shorter word, or run it directly in the terminal');
+  const wrap = card('quick', '⚡ Commands', BUILTIN_COMMANDS.length + custom.length + skills.length,
+    el('div', { class: 'hint' }, 'Click to run inside the live Claude session — hover for what it does'),
+    el('div', { class: 'row' }, filter),
+    body, noResults, el('div', { class: 'subhead' }, 'Keys'), keys,
+  );
+
+  function applyFilter(q) {
+    let shown = 0;
+    for (const c of wrap.querySelectorAll('.chip[data-cmd]')) {
+      const vis = !q || c.getAttribute('data-cmd').includes(q);
+      c.style.display = vis ? '' : 'none';
+      if (vis) shown++;
+    }
+    for (const h of wrap.querySelectorAll('[data-group]')) {
+      const grid = h.nextElementSibling;
+      const any = [...grid.children].some(c => c.style.display !== 'none');
+      h.style.display = grid.style.display = any ? '' : 'none';
+    }
+    noResults.style.display = shown ? 'none' : '';
+  }
+  return wrap;
+}
+
+// --- core settings ---
+const MODELS = ['fable', 'opus', 'sonnet', 'haiku', 'opusplan', 'sonnet[1m]', 'default'];
+const PERM_MODES = ['default', 'auto', 'acceptEdits', 'plan', 'bypassPermissions'];
+const THEMES = ['dark', 'light', 'dark-daltonized', 'light-daltonized', 'dark-ansi', 'light-ansi'];
+
+function settingRow(label, keyPath, options, { allowCustom = false, isBool = false } = {}) {
+  const [scope, value] = effective(keyPath);
+  const scopeSel = el('select', { title: 'Which settings file to write to' },
+    ['user', 'project', 'local'].map(s =>
+      el('option', { value: s, ...(s === (scope === 'managed' || !scope ? 'user' : scope) ? { selected: '' } : {}) }, s)),
+  );
+  let valueCtl;
+  const save = v => mutate(api('POST', '/api/setting', { scope: scopeSel.value, keyPath, value: v }), `${label} → ${v}`);
+  if (isBool) {
+    valueCtl = el('input', { type: 'checkbox', onchange: e => save(e.target.checked) });
+    valueCtl.checked = !!value;
+  } else {
+    valueCtl = el('select', { onchange: e => {
+      if (e.target.value === '__custom__') {
+        const v = prompt(`Custom value for ${keyPath}:`, value ?? '');
+        if (v) save(v); else refreshState();
+      } else save(e.target.value);
+    }},
+      value !== undefined && !options.includes(value) ? el('option', { value, selected: '' }, `${value} (current)`) : null,
+      options.map(o => el('option', { value: o, ...(o === value ? { selected: '' } : {}) }, o)),
+      value === undefined ? el('option', { value: '', selected: '', disabled: '' }, '(not set)') : null,
+      allowCustom ? el('option', { value: '__custom__' }, 'custom…') : null,
+    );
+  }
+  return el('div', { class: 'row' },
+    el('label', {}, label),
+    valueCtl,
+    scope ? badge(scope) : el('span', { class: 'badge' }, 'unset'),
+    scopeSel,
+  );
+}
+
+function cardCore() {
+  return card('core', '🎚️ Core settings', null,
+    settingRow('Model', 'model', MODELS, { allowCustom: true }),
+    settingRow('Permission mode', 'permissions.defaultMode', PERM_MODES),
+    settingRow('Theme', 'theme', THEMES),
+    settingRow('Voice', 'voiceEnabled', [], { isBool: true }),
+    settingRow('Co-authored-by', 'includeCoAuthoredBy', [], { isBool: true }),
+    settingRow('Verbose', 'verbose', [], { isBool: true }),
+    settingRow('Auto-compact', 'autoCompactEnabled', [], { isBool: true }),
+    settingRow('Todos', 'todoFeatureEnabled', [], { isBool: true }),
+    el('div', { class: 'hint' }, 'The badge shows which settings file currently wins. Pick a scope on the right, then change the value to write it there.'),
+  );
+}
+
+// --- permissions ---
+function cardPermissions() {
+  const rows = [];
+  for (const scope of ['managed', 'user', 'project', 'local']) {
+    const perms = state.settings[scope]?.json?.permissions;
+    if (!perms) continue;
+    for (const list of ['allow', 'ask', 'deny']) {
+      for (const rule of perms[list] || []) {
+        rows.push(el('div', { class: 'list-item' },
+          el('span', { class: 'badge ' + list }, list),
+          el('span', { class: 'grow' }, rule),
+          badge(scope),
+          scope !== 'managed' ? el('button', {
+            class: 'del', title: 'Remove rule', 'aria-label': `Remove ${list} rule ${rule}`,
+            onclick: () => {
+              if (!confirm(`Remove ${list} rule "${rule}" from ${scope} settings?`)) return;
+              mutate(api('POST', '/api/permission-rule', { scope, list, action: 'remove', rule }), 'Rule removed');
+            },
+          }, '✕') : null,
+        ));
+      }
+    }
+  }
+  const [modeScope, mode] = effective('permissions.defaultMode');
+  const ruleInput = el('input', { type: 'text', placeholder: 'e.g. Bash(npm run *) or WebFetch(domain:github.com)' });
+  const listSel = el('select', {}, ['allow', 'ask', 'deny'].map(l => el('option', { value: l }, l)));
+  const scopeSel = el('select', {}, ['user', 'project', 'local'].map(s => el('option', { value: s, ...(s === 'project' ? { selected: '' } : {}) }, s)));
+  const addDirs = scopesOf('permissions').flatMap(([scope, p]) =>
+    (p.additionalDirectories || []).map(d => el('div', { class: 'list-item' }, el('span', { class: 'grow' }, d), badge(scope))));
+
+  return card('permissions', '🔐 Permissions', rows.length,
+    el('div', { class: 'row' }, el('label', {}, 'Default mode'), el('span', { class: 'kv' }, String(mode ?? 'default')), modeScope ? badge(modeScope) : null),
+    rows.length ? rows : el('div', { class: 'empty' }, 'No permission rules in any settings file'),
+    el('div', { class: 'subhead' }, 'Add rule'),
+    el('div', { class: 'row' }, listSel, ruleInput),
+    el('div', { class: 'row' },
+      el('label', {}, 'save to'), scopeSel,
+      el('button', { class: 'tiny primary', onclick: e => {
+        if (!ruleInput.value.trim()) return toast('Enter a rule first', true);
+        busy(e.currentTarget, () => mutate(api('POST', '/api/permission-rule', { scope: scopeSel.value, list: listSel.value, action: 'add', rule: ruleInput.value.trim() }), 'Rule added'));
+      }}, 'Add'),
+    ),
+    addDirs.length ? [el('div', { class: 'subhead' }, 'Additional directories'), ...addDirs] : null,
+  );
+}
+
+// --- MCP ---
+function cardMcp() {
+  const items = [];
+  const scopeLabel = { user: 'user', project: 'project', local: 'local' };
+  for (const scope of ['user', 'project', 'local']) {
+    for (const [name, cfg] of Object.entries(state.mcp[scope] || {})) {
+      const desc = cfg.url || [cfg.command, ...(cfg.args || [])].filter(Boolean).join(' ');
+      items.push(el('div', { class: 'list-item' },
+        el('span', { class: 'grow' }, el('div', {}, name), el('div', { class: 'sub' }, `${cfg.type || 'stdio'} · ${desc}`)),
+        badge(scopeLabel[scope]),
+        el('button', {
+          class: 'del', title: 'Remove server (claude mcp remove)', 'aria-label': `Remove MCP server ${name}`,
+          onclick: e => {
+            if (!confirm(`Remove MCP server "${name}" (${scope})?`)) return;
+            busy(e.currentTarget, () => mutate(api('POST', '/api/mcp', { action: 'remove', name, scope }), 'MCP server removed'));
+          },
+        }, '✕'),
+      ));
+    }
+  }
+  const nameIn = el('input', { type: 'text', placeholder: 'name' });
+  const cmdIn = el('input', { type: 'text', placeholder: 'command or URL' });
+  const typeSel = el('select', {}, ['stdio', 'http', 'sse'].map(t => el('option', { value: t }, t)));
+  const scopeSel = el('select', {}, ['local', 'project', 'user'].map(s => el('option', { value: s }, s)));
+
+  return card('mcp', '🔌 MCP servers', items.length,
+    items.length ? items : el('div', { class: 'empty' }, 'No MCP servers configured'),
+    el('div', { class: 'subhead' }, 'Add server'),
+    el('div', { class: 'row' }, nameIn, typeSel, scopeSel),
+    el('div', { class: 'row' }, cmdIn,
+      el('button', { class: 'tiny primary', onclick: e => {
+        const [command, ...args] = cmdIn.value.trim().split(/\s+/);
+        if (!nameIn.value.trim() || !command) return toast('Name and command/URL required', true);
+        busy(e.currentTarget, () => mutate(api('POST', '/api/mcp', {
+          action: 'add', name: nameIn.value.trim(), scope: scopeSel.value,
+          transport: typeSel.value, commandOrUrl: command, args,
+        }), 'MCP server added'));
+      }}, 'Add'),
+    ),
+    state.projectEntry ? el('div', { class: 'hint' },
+      `Project .mcp.json approvals — enabled: ${state.projectEntry.enabledMcpjsonServers.length}, disabled: ${state.projectEntry.disabledMcpjsonServers.length}`) : null,
+  );
+}
+
+// --- hooks ---
+function cardHooks() {
+  const rows = [];
+  for (const scope of ['managed', 'user', 'project', 'local']) {
+    const hooks = state.settings[scope]?.json?.hooks;
+    if (!hooks) continue;
+    for (const [event, matchers] of Object.entries(hooks)) {
+      for (const m of matchers || []) {
+        for (const h of m.hooks || []) {
+          rows.push(el('div', { class: 'list-item' },
+            el('span', { class: 'grow' },
+              el('div', {}, `${event}${m.matcher ? ` · ${m.matcher}` : ''}`),
+              el('div', { class: 'sub' }, h.command || h.type)),
+            badge(scope),
+          ));
+        }
+      }
+    }
+  }
+  return card('hooks', '🪝 Hooks', rows.length,
+    rows.length ? rows : el('div', { class: 'empty' }, 'No hooks configured'),
+    el('div', { class: 'hint' }, 'Edit hooks via Raw files below, or ask Claude to run /update-config'),
+  );
+}
+
+// --- env vars ---
+function cardEnv() {
+  const rows = [];
+  for (const [scope, env] of scopesOf('env')) {
+    for (const [k, v] of Object.entries(env)) {
+      rows.push(el('div', { class: 'list-item' },
+        el('span', { class: 'grow' }, el('span', { class: 'kv' }, el('span', { class: 'k' }, k), ' = ', String(v))),
+        badge(scope),
+        el('button', {
+          class: 'del', title: 'Remove env var', 'aria-label': `Remove env var ${k}`,
+          onclick: () => {
+            if (!confirm(`Remove env var ${k} from ${scope} settings?`)) return;
+            mutate(api('POST', '/api/env-var', { scope, key: k, action: 'remove' }), 'Env var removed');
+          },
+        }, '✕'),
+      ));
+    }
+  }
+  const kIn = el('input', { type: 'text', placeholder: 'NAME' });
+  const vIn = el('input', { type: 'text', placeholder: 'value' });
+  const scopeSel = el('select', {}, ['user', 'project', 'local'].map(s => el('option', { value: s }, s)));
+  return card('env', '🌱 Env vars (settings.env)', rows.length,
+    rows.length ? rows : el('div', { class: 'empty' }, 'No env vars set in settings files'),
+    el('div', { class: 'row' }, kIn, vIn, scopeSel,
+      el('button', { class: 'tiny primary', onclick: e => {
+        if (!kIn.value.trim()) return toast('Name required', true);
+        busy(e.currentTarget, () => mutate(api('POST', '/api/env-var', { scope: scopeSel.value, key: kIn.value.trim(), value: vIn.value }), 'Env var set'));
+      }}, 'Set'),
+    ),
+  );
+}
+
+// --- agents / commands / skills ---
+function cardCatalog(kind, title) {
+  const items = state[kind] || [];
+  return card(kind, title, items.length,
+    items.length ? items.map(it => el('div', {
+      class: 'list-item clickable', title: it.file,
+      ...press(() => openFileModal(it.file), `Edit ${it.name}`),
+    },
+      el('span', { class: 'grow' }, el('div', {}, it.name), it.description ? el('div', { class: 'sub' }, it.description) : null),
+      badge(it.scope),
+    )) : el('div', { class: 'empty' }, `No ${kind} found in ~/.claude/${kind} or .claude/${kind}`),
+  );
+}
+
+// --- memory (CLAUDE.md) ---
+function cardMemory() {
+  const rows = ['user', 'project', 'local'].map(scope => {
+    const m = state.memory[scope];
+    return el('div', { class: 'list-item clickable', ...press(() => openFileModal(m.path, !m.exists), `Edit ${m.path}`) },
+      el('span', { class: 'grow' },
+        el('div', {}, m.path.replace(state.home, '~')),
+        el('div', { class: 'sub' }, m.exists ? `${m.raw.length} chars — click to edit` : 'not created — click to create')),
+      badge(scope),
+    );
+  });
+  const kb = state.keybindings;
+  rows.push(el('div', { class: 'list-item clickable', ...press(() => openFileModal(kb.path, !kb.exists), 'Edit keybindings') },
+    el('span', { class: 'grow' }, el('div', {}, '~/.claude/keybindings.json'), el('div', { class: 'sub' }, kb.exists ? `${(kb.json?.bindings || []).length} binding group(s)` : 'not created')),
+    badge('user'),
+  ));
+  return card('memory', '📝 Memory & keybindings', null, rows);
+}
+
+// ---------------------------------------------------------------------------
+// Conversations tab
+// ---------------------------------------------------------------------------
+let openTranscriptId = null;
+
+function renderChats() {
+  const pane = $('#tab-chats');
+  if (openTranscriptId) return; // don't clobber an open transcript on refresh
+  const sessions = state?.sessions || [];
+  setChildren(pane,
+    el('div', { class: 'hint' }, `Past Claude sessions in ${state.cwd.replace(state.home, '~')} — click to read, Resume to reopen`),
+    sessions.length ? sessions.map(s => el('div', {
+      class: 'list-item clickable', ...press(() => openTranscript(s), `Read conversation: ${s.summary || s.id}`),
+    },
+      el('span', { class: 'grow' },
+        el('div', {}, s.summary || s.id.slice(0, 8)),
+        el('div', { class: 'sub', title: new Date(s.mtime).toLocaleString() }, `${relTime(s.mtime)} · ${(s.size / 1024).toFixed(0)} KB · ${s.id.slice(0, 8)}`)),
+      el('button', {
+        class: 'tiny', title: 'claude --resume ' + s.id,
+        onclick: ev => { ev.stopPropagation(); startClaude(['--resume', s.id]); },
+      }, 'Resume'),
+    )) : el('div', { class: 'empty' }, 'No past sessions for this directory'),
+  );
+}
+
+async function openTranscript(s) {
+  const pane = $('#tab-chats');
+  openTranscriptId = s.id;
+  pane.replaceChildren(el('div', { class: 'empty' }, 'Loading transcript…'));
+  let messages;
+  try {
+    ({ messages } = await api('GET', '/api/session?id=' + encodeURIComponent(s.id)));
+  } catch (e) {
+    toast(e.message, true);
+    openTranscriptId = null;
+    renderChats();
+    return;
+  }
+  setChildren(pane,
+    el('div', { class: 'back-row' },
+      el('button', { class: 'tiny', onclick: () => { openTranscriptId = null; renderChats(); } }, '← Back'),
+      el('span', { class: 'grow sub' }, s.summary || s.id.slice(0, 8)),
+      el('button', { class: 'tiny primary', onclick: () => startClaude(['--resume', s.id]) }, 'Resume'),
+    ),
+    messages.length ? messages.map(m => el('div', { class: 'msg ' + m.role },
+      el('div', { class: 'who' }, m.role === 'user' ? 'You' : 'Claude'),
+      m.text + (m.text.length >= 4000 ? ' …' : ''),
+      m.tools?.length ? el('div', { class: 'tools' }, '🔧 ' + m.tools.join(', ')) : null,
+    )) : el('div', { class: 'empty' }, 'No readable messages in this session'),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Git tab
+// ---------------------------------------------------------------------------
+async function renderGit() {
+  const pane = $('#tab-git');
+  if (!pane.children.length) pane.replaceChildren(el('div', { class: 'empty' }, 'Reading git…'));
+  let g;
+  try { g = await api('GET', '/api/git'); }
+  catch (e) { pane.replaceChildren(el('div', { class: 'empty' }, 'Failed to read git: ' + e.message)); return; }
+  if (!g.isRepo) {
+    pane.replaceChildren(el('div', { class: 'empty' }, `${state?.cwd || 'cwd'} is not a git repository`));
+    return;
+  }
+  setChildren(pane,
+    el('div', { class: 'row' },
+      el('span', { class: 'kv' }, el('span', { class: 'k' }, 'branch '), g.branch),
+      el('span', { class: 'spacer' }),
+      el('button', { class: 'tiny', onclick: renderGit }, '↻ Refresh'),
+    ),
+    g.remote ? el('div', { class: 'kv sub', style: 'margin-bottom:8px' }, el('span', { class: 'k' }, 'remote '), g.remote) : null,
+    el('div', { class: 'subhead' }, `Working tree (${g.status.length} changed)`),
+    g.status.length ? g.status.map(sLine => el('div', { class: 'kv git-status-line' },
+      el('span', { class: 'k' }, sLine.code), sLine.file,
+    )) : el('div', { class: 'empty' }, 'clean'),
+    el('div', { class: 'subhead' }, `History (${g.log.length})`),
+    g.log.length ? g.log.map(c => el('div', {
+      class: 'list-item clickable commit', title: 'Show diff',
+      ...press(() => openCommit(c), `Show diff for ${c.hash} ${c.subject}`),
+    },
+      el('span', { class: 'grow' },
+        el('div', {}, el('span', { class: 'hash' }, c.hash), ' ', c.subject,
+          c.refs ? el('span', { class: 'refs' }, '  (' + c.refs + ')') : null),
+        el('div', { class: 'sub' }, `${c.author} · ${c.date}`)),
+    )) : el('div', { class: 'empty' }, 'No commits yet'),
+  );
+}
+
+async function openCommit(c) {
+  try {
+    const r = await api('GET', '/api/git/show?hash=' + encodeURIComponent(c.hash));
+    openTextModal(`${c.hash} — ${c.subject}`, r.text + (r.truncated ? '\n… [truncated]' : ''));
+  } catch (e) { toast(e.message, true); }
+}
+
+// --- project info ---
+function cardProject() {
+  const pe = state.projectEntry;
+  return card('project', '📁 Project', null,
+    el('div', { class: 'kv' }, el('span', { class: 'k' }, 'cwd '), state.cwd),
+    pe ? [
+      el('div', { class: 'kv' }, el('span', { class: 'k' }, 'trusted '), String(pe.hasTrustDialogAccepted ?? 'unknown')),
+      el('div', { class: 'kv' }, el('span', { class: 'k' }, 'last session '), pe.lastSessionId ? pe.lastSessionId.slice(0, 8) : '—'),
+    ] : el('div', { class: 'empty' }, 'Claude has not been run in this directory yet'),
+    el('div', { class: 'subhead' }, 'Known projects — click to switch'),
+    (state.knownProjects || []).map(p => el('div', {
+      class: 'list-item clickable',
+      ...press(() => mutate(api('POST', '/api/cwd', { cwd: p }), 'Switched project (Start to launch Claude here)'), `Switch to ${p}`),
+    }, el('span', { class: 'grow' }, p.replace(state.home, '~')))),
+    el('div', { class: 'kv' }, el('span', { class: 'k' }, 'installMethod '), String(state.meta.installMethod ?? '?'),
+      '  ', el('span', { class: 'k' }, 'autoUpdates '), String(state.meta.autoUpdates ?? '?'),
+      '  ', el('span', { class: 'k' }, 'startups '), String(state.meta.numStartups ?? '?')),
+  );
+}
+
+// --- raw files ---
+function cardRaw() {
+  const files = [
+    ...['user', 'project', 'local', 'managed'].map(s => ({ label: `settings (${s})`, ...state.settings[s], scope: s })),
+    { label: '.mcp.json (project)', path: state.mcp.projectMcpPath, exists: !!Object.keys(state.mcp.project).length, scope: 'project' },
+  ];
+  return card('raw', '🗄️ Raw files', null,
+    files.map(f => el('div', {
+      class: 'list-item' + (f.scope === 'managed' ? '' : ' clickable'),
+      ...(f.scope === 'managed' ? {} : press(() => openFileModal(f.path, !f.exists), `Edit ${f.label}`)),
+    },
+      el('span', { class: 'grow' },
+        el('div', {}, f.label),
+        el('div', { class: 'sub' }, f.path.replace(state.home, '~') + (f.exists ? '' : ' — not created') + (f.parseError ? ' — ⚠ INVALID JSON' : ''))),
+      badge(f.scope),
+    )),
+    el('div', { class: 'hint' }, 'Every save keeps a .bak of the previous version next to the file.'),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// file modal
+// ---------------------------------------------------------------------------
+let modalFile = null;
+
+function openTextModal(title, text) {
+  modalFile = null;
+  $('#modal-title').textContent = title;
+  $('#modal-save').style.display = 'none';
+  $('#modal-text').value = text;
+  $('#modal-text').readOnly = true;
+  $('#file-modal').showModal();
+}
+
+async function openFileModal(file, isNew = false) {
+  modalFile = file;
+  $('#modal-save').style.display = '';
+  $('#modal-text').readOnly = false;
+  $('#modal-title').textContent = file;
+  let content = '';
+  if (!isNew) {
+    try {
+      const r = await api('GET', '/api/file?path=' + encodeURIComponent(file));
+      content = r.exists ? r.raw : '';
+    } catch (e) { toast(e.message, true); return; }
+  }
+  if (!content && file.endsWith('.json')) content = '{\n}\n';
+  $('#modal-text').value = content;
+  modalBaseline = content;
+  $('#file-modal').showModal();
+}
+let modalBaseline = '';
+const modalDirty = () => !$('#modal-text').readOnly && $('#modal-text').value !== modalBaseline;
+const confirmDiscard = () => !modalDirty() || confirm('Discard unsaved changes?');
+
+$('#modal-close').onclick = () => { if (confirmDiscard()) $('#file-modal').close(); };
+// Esc key fires 'cancel' on <dialog>; guard unsaved edits there too
+$('#file-modal').addEventListener('cancel', e => { if (!confirmDiscard()) e.preventDefault(); });
+// click on the backdrop closes (with the same guard)
+$('#file-modal').addEventListener('click', e => {
+  if (e.target === e.currentTarget && confirmDiscard()) $('#file-modal').close();
+});
+$('#modal-save').onclick = e => busy(e.currentTarget, async () => {
+  try {
+    await api('POST', '/api/file', { file: modalFile, content: $('#modal-text').value });
+    toast('Saved ' + modalFile);
+    $('#file-modal').close();
+    refreshState();
+  } catch (e2) { toast(e2.message, true); }
+});
+
+// ---------------------------------------------------------------------------
+// boot
+// ---------------------------------------------------------------------------
+refreshState();
+setInterval(refreshState, 15000); // safety net if a watcher misses something
+window.addEventListener('resize', sendResize);
