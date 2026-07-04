@@ -1,4 +1,4 @@
-/* Claude Deck — frontend */
+/* Amir Hates The Claude CLI UI — frontend */
 'use strict';
 
 // ---------------------------------------------------------------------------
@@ -65,8 +65,29 @@ function toast(msg, isError = false) {
   toastTimer = setTimeout(() => t.className = '', isError ? 5000 : 2600);
 }
 
+// ---------------------------------------------------------------------------
+// server connection — same-origin when served locally, or a local server
+// reached from GitHub Pages via ?server=…&token=… (persisted after first use)
+// ---------------------------------------------------------------------------
+const bootParams = new URLSearchParams(location.search);
+if (bootParams.get('server')) localStorage.setItem('deckServer', bootParams.get('server').replace(/\/$/, ''));
+if (bootParams.get('token')) localStorage.setItem('deckToken', bootParams.get('token'));
+const IS_STATIC_HOST = location.protocol === 'file:' || /github\.io$/.test(location.hostname);
+const SERVER = localStorage.getItem('deckServer') || (IS_STATIC_HOST ? 'http://127.0.0.1:3456' : location.origin);
+const TOKEN = localStorage.getItem('deckToken') || '';
+const REMOTE = SERVER !== location.origin;
+
+function apiUrl(p) {
+  const tok = REMOTE && TOKEN ? (p.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN) : '';
+  return SERVER + p + tok;
+}
+function wsUrl(p) {
+  const tok = REMOTE && TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '';
+  return SERVER.replace(/^http/, 'ws') + p + tok;
+}
+
 async function api(method, url, body) {
-  const res = await fetch(url, {
+  const res = await fetch(apiUrl(url), {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
@@ -74,6 +95,31 @@ async function api(method, url, body) {
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(j.error || res.statusText);
   return j;
+}
+
+// simple connect screen when the local server can't be reached from a static host
+function showConnectHelp(err) {
+  const srvIn = el('input', { type: 'text', value: SERVER, 'aria-label': 'Server URL', placeholder: 'http://127.0.0.1:3456' });
+  const tokIn = el('input', { type: 'text', value: TOKEN, 'aria-label': 'Access token', placeholder: 'token printed by the server' });
+  setChildren($('#tab-config'),
+    el('div', { class: 'card open' },
+      el('div', { class: 'card-head' }, '🔌 Connect to your machine'),
+      el('div', { class: 'card-body' },
+        el('div', { class: 'hint' }, `This page is static — it needs your local server. (${err})`),
+        el('div', { class: 'hint' }, '1. On your machine run: npm start (in the better-claude-cli-ui repo)'),
+        el('div', { class: 'hint' }, '2. Copy the ?server=…&token=… URL it prints, or paste the values here:'),
+        el('div', { class: 'row' }, el('label', {}, 'Server'), srvIn),
+        el('div', { class: 'row' }, el('label', {}, 'Token'), tokIn),
+        el('div', { class: 'row' }, el('button', {
+          class: 'primary', onclick: () => {
+            localStorage.setItem('deckServer', srvIn.value.trim().replace(/\/$/, ''));
+            localStorage.setItem('deckToken', tokIn.value.trim());
+            location.reload();
+          },
+        }, 'Connect')),
+      ),
+    ),
+  );
 }
 
 // mutate + toast; the file watcher pushes a refresh, but refresh eagerly too
@@ -207,7 +253,7 @@ function closeSession(sid) {
 }
 
 function connectTerm() {
-  termWs = new WebSocket(`ws://${location.host}/ws/term`);
+  termWs = new WebSocket(wsUrl('/ws/term'));
   termWs.onmessage = ev => {
     const m = JSON.parse(ev.data);
     switch (m.type) {
@@ -329,7 +375,7 @@ $('#divider').addEventListener('keydown', e => {
 // events websocket → live refresh
 // ---------------------------------------------------------------------------
 function connectEvents() {
-  const ws = new WebSocket(`ws://${location.host}/ws/events`);
+  const ws = new WebSocket(wsUrl('/ws/events'));
   ws.onmessage = ev => {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'state') refreshState();
@@ -356,6 +402,7 @@ async function refreshState() {
   try {
     state = await api('GET', '/api/state');
   } catch (e) {
+    if (REMOTE && !state) { showConnectHelp(e.message); return; }
     toast('Failed to load state: ' + e.message, true);
     return;
   }

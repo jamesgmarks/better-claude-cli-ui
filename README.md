@@ -1,4 +1,4 @@
-# Claude Deck 🎛️
+# Amir Hates The Claude CLI UI 🎛️
 
 A two-pane web UI for Claude Code: a **live dashboard** on the left, the **real `claude` CLI** in a terminal on the right. Everything about your Claude setup is visible and clickable.
 

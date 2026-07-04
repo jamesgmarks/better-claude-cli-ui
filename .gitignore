@@ -2,3 +2,4 @@ node_modules/
 *.log
 *.pptx
 .command-cache.json
+.deck-token

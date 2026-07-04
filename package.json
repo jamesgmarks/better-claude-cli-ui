@@ -1,7 +1,7 @@
 {
   "name": "better-claude-cli-ui",
   "version": "0.1.0",
-  "description": "Two-pane web UI for Claude Code: real terminal on the left, live config dashboard on the right",
+  "description": "Amir Hates The Claude CLI UI — dashboard + real claude terminal, nothing hidden",
   "type": "module",
   "main": "server.js",
   "scripts": {

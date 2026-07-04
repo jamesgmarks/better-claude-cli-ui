@@ -2,6 +2,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import * as pty from 'node-pty';
 import { execFile } from 'child_process';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -473,13 +474,57 @@ function setupWatchers() {
 setupWatchers();
 
 // ---------------------------------------------------------------------------
+// Remote access (GitHub Pages frontend → this local server)
+// A cross-origin page may only talk to this server with the access token.
+// Without this gate, ANY website you visit could read your Claude config and
+// drive your terminal via ws://127.0.0.1.
+// ---------------------------------------------------------------------------
+const TOKEN_FILE = path.join(__dirname, '.deck-token');
+let accessToken;
+try { accessToken = fs.readFileSync(TOKEN_FILE, 'utf8').trim(); } catch {}
+if (!accessToken) {
+  accessToken = crypto.randomBytes(24).toString('base64url');
+  fs.writeFileSync(TOKEN_FILE, accessToken + '\n', { mode: 0o600 });
+}
+
+function isLocalOrigin(origin) {
+  if (!origin) return true; // same-origin navigation / curl send no Origin
+  try {
+    const u = new URL(origin);
+    return ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname);
+  } catch { return false; }
+}
+
+function requestToken(req) {
+  const url = new URL(req.url, 'http://x');
+  return url.searchParams.get('token')
+    || (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+}
+
+function authorized(req) {
+  return isLocalOrigin(req.headers.origin) || requestToken(req) === accessToken;
+}
+
+// ---------------------------------------------------------------------------
 // HTTP API
 // ---------------------------------------------------------------------------
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
-app.use('/vendor/xterm', express.static(path.join(__dirname, 'node_modules', '@xterm', 'xterm')));
-app.use('/vendor/addon-fit', express.static(path.join(__dirname, 'node_modules', '@xterm', 'addon-fit')));
+
+// CORS + auth gate for every /api route
+app.use('/api', (req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  if (!authorized(req)) return res.status(403).json({ error: 'missing or wrong access token — copy the connect URL printed when the server starts' });
+  next();
+});
 
 app.get('/api/state', (req, res) => {
   try { res.json(getState()); } catch (e) { res.status(500).json({ error: String(e.message) }); }
@@ -643,8 +688,11 @@ const wssTerm = new WebSocketServer({ noServer: true });
 const wssEvents = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
-  if (req.url === '/ws/term') wssTerm.handleUpgrade(req, socket, head, ws => wssTerm.emit('connection', ws));
-  else if (req.url === '/ws/events') wssEvents.handleUpgrade(req, socket, head, ws => wssEvents.emit('connection', ws));
+  // WebSockets are NOT protected by CORS — enforce the same token gate here
+  if (!authorized(req)) { socket.destroy(); return; }
+  const pathname = req.url.split('?')[0];
+  if (pathname === '/ws/term') wssTerm.handleUpgrade(req, socket, head, ws => wssTerm.emit('connection', ws));
+  else if (pathname === '/ws/events') wssEvents.handleUpgrade(req, socket, head, ws => wssEvents.emit('connection', ws));
   else socket.destroy();
 });
 
@@ -689,6 +737,8 @@ wssEvents.on('connection', ws => {
   ws.on('close', () => eventClients.delete(ws));
 });
 
+const PAGES_URL = process.env.DECK_PAGES_URL || 'https://amirbukhari.github.io/better-claude-cli-ui/';
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Claude Deck running at http://127.0.0.1:${PORT}  (cwd: ${cwd})`);
+  console.log(`Amir Hates The Claude CLI UI — running locally at http://127.0.0.1:${PORT}  (cwd: ${cwd})`);
+  console.log(`From GitHub Pages, open:\n  ${PAGES_URL}?server=http://127.0.0.1:${PORT}&token=${accessToken}`);
 });
