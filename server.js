@@ -581,6 +581,9 @@ app.use('/api', (req, res, next) => {
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    // Chrome Private Network Access: https pages need this on the preflight
+    // to be allowed to reach a localhost server at all
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   if (!authorized(req)) return res.status(403).json({ error: 'missing or wrong access token — copy the connect URL printed when the server starts' });
@@ -727,6 +730,13 @@ app.get('/api/git/show', async (req, res) => {
   const out = await git(['show', '--stat', '--patch', '--no-color', hash]);
   if (out === null) return res.status(404).json({ error: 'git show failed' });
   res.json({ text: out.slice(0, 200_000), truncated: out.length > 200_000 });
+});
+
+// lets the CLI/tray stop the server on platforms without a service manager
+app.post('/api/shutdown', (req, res) => {
+  res.json({ ok: true });
+  console.log('shutdown requested via API');
+  setTimeout(() => process.exit(0), 300);
 });
 
 app.post('/api/update', async (req, res) => {
