@@ -17,20 +17,106 @@ const PORT = Number(process.env.PORT || 3456);
 let cwd = process.env.CLAUDE_UI_CWD || process.cwd();
 
 // ---------------------------------------------------------------------------
-// Config file locations
+// Claude config profiles
+//
+// A "profile" is one Claude Code config environment: a config directory (what
+// `claude` reads as CLAUDE_CONFIG_DIR) plus the .claude.json inside it. The
+// DEFAULT profile is exactly what plain `claude` uses here — $CLAUDE_CONFIG_DIR
+// if set, otherwise ~/.claude — so anyone with a single setup sees no change
+// and nothing needs configuring.
+//
+// People who run several accounts (e.g. ~/.claude + ~/.claude-work) get each
+// one as a selectable profile, discovered automatically from sibling ~/.claude*
+// config dirs, or listed explicitly via CLAUDE_UI_PROFILES ("work:~/.claude-work,
+// ~/.claude-test"). Every terminal session runs under its profile's
+// CLAUDE_CONFIG_DIR, so personal and work sessions can run side by side.
 // ---------------------------------------------------------------------------
-const paths = () => ({
-  userSettings: path.join(HOME, '.claude', 'settings.json'),
-  projectSettings: path.join(cwd, '.claude', 'settings.json'),
-  localSettings: path.join(cwd, '.claude', 'settings.local.json'),
-  managedSettings: '/etc/claude-code/managed-settings.json',
-  claudeJson: path.join(HOME, '.claude.json'),
-  projectMcp: path.join(cwd, '.mcp.json'),
-  keybindings: path.join(HOME, '.claude', 'keybindings.json'),
-  userMemory: path.join(HOME, '.claude', 'CLAUDE.md'),
-  projectMemory: path.join(cwd, 'CLAUDE.md'),
-  localMemory: path.join(cwd, 'CLAUDE.local.md'),
-});
+const expandHome = p => p.replace(/^~(?=\/|$)/, HOME);
+const DEFAULT_CONFIG_DIR = path.resolve(
+  process.env.CLAUDE_CONFIG_DIR ? expandHome(process.env.CLAUDE_CONFIG_DIR) : path.join(HOME, '.claude'));
+
+// Current Claude keeps .claude.json inside the config dir; older setups kept the
+// default one at ~/.claude.json. Prefer the inner file, fall back to the legacy
+// location for the default dir only — so existing single-profile users are
+// unaffected while relocated profiles resolve correctly.
+function claudeJsonFor(configDir) {
+  const inner = path.join(configDir, '.claude.json');
+  if (fs.existsSync(inner)) return inner;
+  const legacy = path.join(HOME, '.claude.json');
+  if (configDir === path.join(HOME, '.claude') && fs.existsSync(legacy)) return legacy;
+  return inner; // not created yet — this is where Claude will write it
+}
+
+// Does a directory look like a Claude config dir? Used for auto-discovery, so
+// shared-scaffolding dirs (e.g. ~/.claude-shared with only skills/hooks and no
+// real config) are skipped rather than mistaken for accounts.
+function isConfigDir(dir) {
+  try {
+    if (fs.existsSync(path.join(dir, '.claude.json'))) return true;
+    return fs.existsSync(path.join(dir, 'settings.json'))
+      && fs.statSync(path.join(dir, 'projects')).isDirectory();
+  } catch { return false; }
+}
+
+// ".claude" -> "default", ".claude-work" -> "work", ".config-x" -> "config-x"
+const labelForDir = dir => (path.basename(dir).replace(/^\.claude-?/, '').replace(/^\./, '') || 'default');
+
+function discoverProfiles() {
+  const byDir = new Map(); // configDir -> { configDir, label, claudeJson }
+  const add = (dir, label) => {
+    const resolved = path.resolve(expandHome(dir));
+    if (byDir.has(resolved)) { if (label) byDir.get(resolved).label = label; return; }
+    byDir.set(resolved, { configDir: resolved, label: label || labelForDir(resolved), claudeJson: claudeJsonFor(resolved) });
+  };
+  // 1) the default always exists and sorts first
+  add(DEFAULT_CONFIG_DIR);
+  // 2) explicit list wins for naming — "label:path" or a bare path, comma/;-separated
+  for (const spec of (process.env.CLAUDE_UI_PROFILES || '').split(/[,;]/).map(s => s.trim()).filter(Boolean)) {
+    const m = spec.match(/^([^:/~][^:]*):(.+)$/); // label:path (a bare /… or ~/… path has no label)
+    if (m) add(m[2].trim(), m[1].trim()); else add(spec);
+  }
+  // 3) auto-discover sibling ~/.claude* config dirs (e.g. ~/.claude-work)
+  const parent = path.dirname(DEFAULT_CONFIG_DIR);
+  try {
+    for (const e of fs.readdirSync(parent, { withFileTypes: true })) {
+      const dir = path.join(parent, e.name);
+      if (e.isDirectory() && e.name.startsWith('.claude') && dir !== DEFAULT_CONFIG_DIR && isConfigDir(dir)) add(dir);
+    }
+  } catch {}
+  // stable, unique, url-safe ids derived from the label
+  const used = new Set();
+  return [...byDir.values()].map(p => {
+    const base = (p.label || 'default').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'p';
+    let id = base, n = 2;
+    while (used.has(id)) id = `${base}-${n++}`;
+    used.add(id);
+    return { ...p, id, isDefault: p.configDir === DEFAULT_CONFIG_DIR };
+  });
+}
+
+let profiles = discoverProfiles();
+let activeProfileId = profiles[0].id;
+const profileById = id => profiles.find(p => p.id === id) || profiles[0];
+const activeProfile = () => profileById(activeProfileId);
+
+// ---------------------------------------------------------------------------
+// Config file locations (relative to the active profile)
+// ---------------------------------------------------------------------------
+const paths = () => {
+  const dir = activeProfile().configDir;
+  return {
+    userSettings: path.join(dir, 'settings.json'),
+    projectSettings: path.join(cwd, '.claude', 'settings.json'),
+    localSettings: path.join(cwd, '.claude', 'settings.local.json'),
+    managedSettings: '/etc/claude-code/managed-settings.json',
+    claudeJson: activeProfile().claudeJson,
+    projectMcp: path.join(cwd, '.mcp.json'),
+    keybindings: path.join(dir, 'keybindings.json'),
+    userMemory: path.join(dir, 'CLAUDE.md'),
+    projectMemory: path.join(cwd, 'CLAUDE.md'),
+    localMemory: path.join(cwd, 'CLAUDE.local.md'),
+  };
+};
 
 const SETTINGS_SCOPES = {
   user: () => paths().userSettings,
@@ -72,6 +158,7 @@ function writeFileSafe(file, content) {
 // Only these files/dirs may be read or written through the raw file API.
 function isAllowedFile(file) {
   const p = paths();
+  const dir = activeProfile().configDir;
   const resolved = path.resolve(file);
   const exact = [
     p.userSettings, p.projectSettings, p.localSettings, p.projectMcp,
@@ -79,9 +166,9 @@ function isAllowedFile(file) {
   ];
   if (exact.includes(resolved)) return true;
   const roots = [
-    path.join(HOME, '.claude', 'agents'),
-    path.join(HOME, '.claude', 'skills'),
-    path.join(HOME, '.claude', 'commands'),
+    path.join(dir, 'agents'),
+    path.join(dir, 'skills'),
+    path.join(dir, 'commands'),
     path.join(cwd, '.claude', 'agents'),
     path.join(cwd, '.claude', 'skills'),
     path.join(cwd, '.claude', 'commands'),
@@ -130,7 +217,7 @@ function listMarkdownDir(dir, scope, kind) {
 
 function discover() {
   const both = (sub, kind) => [
-    ...listMarkdownDir(path.join(HOME, '.claude', sub), 'user', kind),
+    ...listMarkdownDir(path.join(activeProfile().configDir, sub), 'user', kind),
     ...listMarkdownDir(path.join(cwd, '.claude', sub), 'project', kind),
   ];
   return {
@@ -143,9 +230,9 @@ function discover() {
 // ---------------------------------------------------------------------------
 // Session history for the current project
 // ---------------------------------------------------------------------------
-function sessionDirFor(projectPath) {
+function sessionDirFor(projectPath, configDir = activeProfile().configDir) {
   const encoded = projectPath.replace(/[^a-zA-Z0-9-]/g, '-');
-  return path.join(HOME, '.claude', 'projects', encoded);
+  return path.join(configDir, 'projects', encoded);
 }
 function projectSessionDir() { return sessionDirFor(cwd); }
 
@@ -318,6 +405,8 @@ function getState() {
     cwd,
     home: HOME,
     claudeVersion,
+    profiles: profiles.map(({ id, label, configDir, isDefault }) => ({ id, label, configDir, isDefault })),
+    activeProfileId,
     terminal: { sessions: sessionList() },
     account: cj.oauthAccount ? {
       email: cj.oauthAccount.emailAddress,
@@ -474,7 +563,7 @@ function broadcastEvent(msg) {
   for (const ws of eventClients) if (ws.readyState === 1) ws.send(s);
 }
 
-const sessionInfo = (sid, s) => ({ sid, pid: s.pid, cwd: s.cwd, args: s.args, status: s.status, activity: s.activity || 'working', createdAt: s.createdAt });
+const sessionInfo = (sid, s) => ({ sid, pid: s.pid, cwd: s.cwd, args: s.args, status: s.status, activity: s.activity || 'working', createdAt: s.createdAt, profile: s.profile });
 const sessionList = () => [...sessions.entries()].map(([sid, s]) => sessionInfo(sid, s));
 
 // ---------------------------------------------------------------------------
@@ -509,19 +598,25 @@ setInterval(() => {
   }
 }, 1000);
 
-function startSession({ cwd: dir, args = [], cols = 120, rows = 32 } = {}) {
+function startSession({ cwd: dir, args = [], cols = 120, rows = 32, profile: profileId } = {}) {
   const resolved = path.resolve(String(dir || cwd).replace(/^~(?=\/|$)/, HOME));
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
     throw new Error('not a directory: ' + resolved);
   }
+  const prof = profileById(profileId || activeProfileId);
   const sid = 's' + (++sidCounter);
+  const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
+  // Non-default profiles run under their own CLAUDE_CONFIG_DIR so accounts can
+  // run concurrently; the default passes the environment through untouched, so
+  // single-profile behaviour is byte-for-byte what it was before.
+  if (!prof.isDefault) env.CLAUDE_CONFIG_DIR = prof.configDir;
   const proc = pty.spawn('claude', (Array.isArray(args) ? args : []).map(String), {
     name: 'xterm-256color',
     cols: cols > 0 ? cols : 120, rows: rows > 0 ? rows : 32,
     cwd: resolved,
-    env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+    env,
   });
-  const sess = { pty: proc, cwd: resolved, args, scrollback: '', status: 'running', pid: proc.pid, createdAt: Date.now() };
+  const sess = { pty: proc, cwd: resolved, args, scrollback: '', status: 'running', pid: proc.pid, createdAt: Date.now(), profile: prof.id };
   sessions.set(sid, sess);
   proc.onData(d => {
     sess.scrollback = (sess.scrollback + d).slice(-SCROLLBACK_MAX);
@@ -556,11 +651,12 @@ let watchDebounce = null;
 function setupWatchers() {
   for (const w of watchers.splice(0)) { try { w.close(); } catch {} }
   const p = paths();
+  const dir = activeProfile().configDir;
   const targets = [
-    path.join(HOME, '.claude'),
+    dir,
     path.join(cwd, '.claude'),
     p.claudeJson, p.projectMcp, p.projectMemory, p.localMemory,
-    path.join(HOME, '.claude', 'agents'), path.join(HOME, '.claude', 'skills'), path.join(HOME, '.claude', 'commands'),
+    path.join(dir, 'agents'), path.join(dir, 'skills'), path.join(dir, 'commands'),
     path.join(cwd, '.claude', 'agents'), path.join(cwd, '.claude', 'skills'), path.join(cwd, '.claude', 'commands'),
   ];
   for (const t of targets) {
@@ -875,6 +971,20 @@ app.post('/api/cwd', (req, res) => {
   } catch (e) { res.status(400).json({ error: String(e.message) }); }
 });
 
+// switch which profile the dashboard reflects (config, memory, chats, account).
+// re-discovers first so profiles created since startup show up.
+app.post('/api/profile', (req, res) => {
+  const id = String(req.body?.id || '');
+  profiles = discoverProfiles();
+  if (!profiles.some(p => p.id === activeProfileId)) activeProfileId = profiles[0].id;
+  const prof = profiles.find(p => p.id === id);
+  if (!prof) return res.status(400).json({ error: 'unknown profile' });
+  activeProfileId = prof.id;
+  setupWatchers();
+  broadcastEvent({ type: 'state' });
+  res.json({ ok: true, profile: { id: prof.id, label: prof.label, configDir: prof.configDir } });
+});
+
 // ---------------------------------------------------------------------------
 // WebSockets
 // ---------------------------------------------------------------------------
@@ -935,5 +1045,8 @@ wssEvents.on('connection', ws => {
 const PAGES_URL = process.env.DECK_PAGES_URL || 'https://amirbukhari.github.io/better-claude-cli-ui/';
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Amir Hates The Claude CLI UI — running locally at http://127.0.0.1:${PORT}  (cwd: ${cwd})`);
+  if (profiles.length > 1) {
+    console.log(`profiles: ${profiles.map(p => p.label + (p.isDefault ? ' (default)' : '')).join(', ')}`);
+  }
   console.log(`From GitHub Pages, open:\n  ${PAGES_URL}?server=http://127.0.0.1:${PORT}&token=${accessToken}`);
 });

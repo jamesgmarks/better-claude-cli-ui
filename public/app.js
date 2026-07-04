@@ -220,10 +220,14 @@ function activateSession(sid) {
   });
   renderSessionTabs();
   setStatus();
-  // the dashboard (config, git, "this project" chats) follows the active session
-  if (t.info?.cwd && state && t.info.cwd !== state.cwd) {
-    api('POST', '/api/cwd', { cwd: t.info.cwd }).then(refreshState).catch(() => {});
-  }
+  // the dashboard (config, git, "this project" chats) follows the active session:
+  // both its project (cwd) and its profile (which Claude config/account it runs)
+  const sync = [];
+  if (t.info?.profile && state && t.info.profile !== state.activeProfileId)
+    sync.push(api('POST', '/api/profile', { id: t.info.profile }));
+  if (t.info?.cwd && state && t.info.cwd !== state.cwd)
+    sync.push(api('POST', '/api/cwd', { cwd: t.info.cwd }));
+  if (sync.length) Promise.all(sync).then(refreshState).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -286,12 +290,15 @@ function renderSessionTabs() {
     const act = activityOf(info);
     const ui = ACTIVITY_UI[act] || ACTIVITY_UI.working;
     const flavor = info.args?.includes('--continue') ? '⏩ ' : info.args?.includes('--resume') ? '⟲ ' : '';
+    // show which account a tab runs under, but only when more than one exists
+    const prof = (state?.profiles?.length > 1) && state.profiles.find(p => p.id === info.profile);
     return el('div', {
       class: 'sess-tab' + (sid === activeSid ? ' active' : '') + (act === 'exited' ? ' dead' : '') + ' act-' + ui.cls,
-      title: `${ui.hint}\n${info.cwd || ''}${info.args?.length ? '\nclaude ' + info.args.join(' ') : ''}`,
+      title: `${ui.hint}\n${info.cwd || ''}${prof ? '\nprofile: ' + prof.label : ''}${info.args?.length ? '\nclaude ' + info.args.join(' ') : ''}`,
       ...press(() => activateSession(sid), `Switch to session in ${shortDir(info.cwd)} (${ui.label})`),
     },
       el('span', { class: 'sess-dot ' + ui.cls, 'aria-hidden': 'true' }),
+      prof ? el('span', { class: 'sess-prof' }, prof.label) : null,
       el('span', { class: 'sess-label' }, `${flavor}${shortDir(info.cwd)}`),
       act === 'question' ? el('span', { class: 'sess-ask' }, '?') : null,
       el('button', {
@@ -421,7 +428,7 @@ function startClaude(extra = [], cwdOverride = null) {
   if ($('#flag-skip').checked) args.push('--dangerously-skip-permissions');
   const typed = $('#extra-args').value.trim();
   if (typed) args.push(...typed.split(/\s+/));
-  wsSend({ type: 'start', cwd: cwdOverride || state?.cwd, args, cols: 120, rows: 32 });
+  wsSend({ type: 'start', cwd: cwdOverride || state?.cwd, args, cols: 120, rows: 32, profile: state?.activeProfileId });
 }
 
 $('#btn-start').onclick = () => startClaude();
@@ -547,8 +554,29 @@ function renderTopbar() {
   $('#version').textContent = state.claudeVersion || '';
   $('#acct').textContent = state.account ? `${state.account.email} · ${state.account.organization ?? ''}` : '';
   if (document.activeElement !== $('#cwd-input')) $('#cwd-input').value = state.cwd;
+  renderProfiles();
   renderUpdateBanner();
 }
+
+// profile picker: hidden entirely for single-profile setups (the common case),
+// so nothing changes for people who don't run multiple Claude accounts
+function renderProfiles() {
+  const box = $('#profile-box'), sel = $('#profile-select');
+  const profs = state.profiles || [];
+  box.hidden = profs.length < 2;
+  if (box.hidden || document.activeElement === sel) return; // don't fight an open dropdown
+  setChildren(sel, ...profs.map(p =>
+    el('option', { value: p.id }, p.isDefault && p.label !== 'default' ? `${p.label} · default` : p.label)));
+  sel.value = state.activeProfileId;
+}
+
+$('#profile-select').addEventListener('change', async e => {
+  try {
+    await api('POST', '/api/profile', { id: e.target.value });
+    toast(`Dashboard now showing "${e.target.selectedOptions[0]?.textContent || e.target.value}" — new sessions use it too`);
+    refreshState();
+  } catch (err) { toast(err.message, true); }
+});
 
 // "new version pushed to the repo" banner — appears under the topbar
 function renderUpdateBanner() {

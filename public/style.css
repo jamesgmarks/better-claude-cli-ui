@@ -51,6 +51,9 @@ body {
 .cwd-box { display: flex; align-items: center; gap: 6px; flex: 0 1 480px; min-width: 200px; }
 .cwd-box label { color: var(--muted); font-size: 11px; }
 .cwd-box input { flex: 1; }
+.profile-box { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.profile-box[hidden] { display: none; }
+.profile-box label { color: var(--muted); font-size: 11px; }
 
 /* ---------- inputs / buttons ---------- */
 input, select, textarea {
@@ -132,6 +135,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .sess-tab.dead { opacity: .55; }
 .sess-tab:hover { color: var(--text); }
 .sess-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-prof { font-size: 10px; padding: 0 5px; border-radius: 8px; background: var(--bg2); border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
 
 /* agent state at a glance: pulsing green = working, solid amber = your turn,
    flashing red + ? = asking you something, grey = exited */
