@@ -177,7 +177,11 @@ function ensureTerm(info) {
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(div);
-  term.onData(d => wsSend({ type: 'input', sid: info.sid, data: d }));
+  term.onData(d => {
+    t.lastKeyAt = Date.now();
+    if (d.includes('\r')) t.lastEnterAt = t.lastKeyAt;
+    wsSend({ type: 'input', sid: info.sid, data: d });
+  });
   const t = { term, fit, div, info };
   terms.set(info.sid, t);
   updateEmptyState();
@@ -222,6 +226,47 @@ function activateSession(sid) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// auto-focus (opt-in): waiting tabs sort to the front; when the active
+// session starts working, jump to whichever session is waiting on you
+// ---------------------------------------------------------------------------
+let autoFocus = localStorage.getItem('autoFocus') === '1';
+let lastAutoSwitch = 0;
+
+const ATTENTION_ORDER = { question: 0, ready: 1, working: 2, exited: 3 };
+
+function orderedTerms() {
+  const entries = [...terms.entries()];
+  if (!autoFocus) return entries;
+  return entries.sort((a, b) =>
+    (ATTENTION_ORDER[activityOf(a[1].info)] ?? 2) - (ATTENTION_ORDER[activityOf(b[1].info)] ?? 2)
+    || (a[1].info?.createdAt || 0) - (b[1].info?.createdAt || 0));
+}
+
+// typing echo makes an idle session look "working" — never yank the view
+// mid-typing; do jump right after a submit (that's the "I answered, next" moment)
+function typingGuardOk(t) {
+  const now = Date.now();
+  const sinceKey = now - (t.lastKeyAt || 0);
+  const sinceEnter = now - (t.lastEnterAt || 0);
+  return sinceEnter < 3000 || sinceKey > 5000;
+}
+
+function maybeAutoFocus() {
+  if (!autoFocus) return;
+  const active = terms.get(activeSid);
+  if (!active || activityOf(active.info) !== 'working') return; // never leave a tab that needs you
+  if (!typingGuardOk(active)) return;
+  if (Date.now() - lastAutoSwitch < 2000) return;
+  const next = orderedTerms().find(([sid, t]) =>
+    sid !== activeSid && ['question', 'ready'].includes(activityOf(t.info)));
+  if (next) {
+    lastAutoSwitch = Date.now();
+    activateSession(next[0]);
+    toast(`🎯 ${shortDir(next[1].info?.cwd)} is waiting on you`);
+  }
+}
+
 // agent state → how the tab signals it, at a glance
 const ACTIVITY_UI = {
   working: { cls: 'working', label: 'working…', hint: 'Claude is working — no action needed' },
@@ -236,7 +281,7 @@ function activityOf(info) {
 
 function renderSessionTabs() {
   const bar = $('#session-tabs');
-  const tabs = [...terms.entries()].map(([sid, t]) => {
+  const tabs = orderedTerms().map(([sid, t]) => {
     const info = t.info || {};
     const act = activityOf(info);
     const ui = ACTIVITY_UI[act] || ACTIVITY_UI.working;
@@ -327,6 +372,7 @@ function connectTerm() {
           t.info.activity = m.activity;
           renderSessionTabs();
           setStatus();
+          maybeAutoFocus();
         }
         break;
       }
@@ -359,6 +405,15 @@ function setStatus() {
     ? `${n} session${n === 1 ? '' : 's'}${needsYou ? ` · ${needsYou} waiting on you` : ''}`
     : 'no sessions';
 }
+
+$('#flag-autofocus').checked = autoFocus;
+$('#flag-autofocus').onchange = e => {
+  autoFocus = e.target.checked;
+  localStorage.setItem('autoFocus', autoFocus ? '1' : '0');
+  renderSessionTabs();
+  if (autoFocus) maybeAutoFocus();
+  toast(autoFocus ? '🎯 Auto-focus on — sessions waiting on you come to the front' : 'Auto-focus off');
+};
 
 // start a NEW session tab; never touches the ones already running
 function startClaude(extra = [], cwdOverride = null) {
