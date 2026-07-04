@@ -228,6 +228,10 @@ function activateSession(sid) {
   requestAnimationFrame(() => {
     t.fit.fit();
     wsSend({ type: 'resize', sid, cols: t.term.cols, rows: t.term.rows });
+    // A tab that was display:none leaves xterm's renderer dormant; if the fit
+    // didn't change dimensions there's no auto-redraw, so the just-shown tab can
+    // paint a stale canvas until a manual resize forces it. Force the repaint.
+    t.term.refresh(0, t.term.rows - 1);
     t.term.focus();
   });
   renderSessionTabs();
