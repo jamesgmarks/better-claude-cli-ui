@@ -24,15 +24,19 @@ jobs:
       - uses: actions/checkout@v4
       # Pages must be in "GitHub Actions" mode or deploy-pages fails and the
       # legacy Jekyll branch build serves the README instead of the app.
-      # The setting has been flipped back to branch mode before — force it
-      # every deploy so the site self-heals.
-      - name: Ensure Pages deploys from Actions, not the branch
+      # GITHUB_TOKEN can't change site config (admin-only), so this can only
+      # warn loudly with the fix — the root index.html redirect keeps the
+      # site usable in branch mode meanwhile.
+      - name: Check Pages is set to deploy from Actions
         run: |
-          curl -sf -X PUT \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          BT=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/pages" \
-            -d '{"build_type":"workflow"}'
+            "https://api.github.com/repos/${{ github.repository }}/pages" | \
+            python3 -c 'import json,sys; print(json.load(sys.stdin).get("build_type",""))')
+          echo "Pages build_type: $BT"
+          if [ "$BT" != "workflow" ]; then
+            echo "::warning::Pages source is '$BT', not 'workflow' — the deploy step below will fail. Fix: repo Settings → Pages → Build and deployment → Source → 'GitHub Actions'."
+          fi
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
