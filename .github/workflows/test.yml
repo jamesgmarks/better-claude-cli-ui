@@ -1,0 +1,64 @@
+name: Test install on Linux / macOS / Windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies (node-pty native build)
+        run: |
+          npm install --no-fund --no-audit
+          node -e "import('node-pty').then(()=>console.log('node-pty loads OK'),e=>{console.error(e);process.exit(1)})"
+
+      - name: Boot server and hit the API
+        run: |
+          node server.js &
+          SERVER_PID=$!
+          for i in $(seq 1 20); do
+            curl -sf -m 2 http://127.0.0.1:3456/api/state >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:3456/api/state | head -c 300; echo
+          curl -sf -X POST http://127.0.0.1:3456/api/update/check
+          kill $SERVER_PID
+
+      - name: deck.js install (from this checkout, not origin)
+        env:
+          DECK_REPO_URL: ${{ github.workspace }}
+        run: node bin/deck.js install
+
+      - name: deck.js status + assert artifacts
+        run: |
+          node bin/deck.js status
+          case "$RUNNER_OS" in
+            Linux)   test -d "$HOME/.local/share/claude-deck/app" ;;
+            macOS)   test -d "$HOME/Library/Application Support/claude-deck/app" && test -f "$HOME/Library/LaunchAgents/com.claude-deck.server.plist" ;;
+            Windows) test -d "$LOCALAPPDATA/claude-deck/app" ;;
+          esac
+          echo "install artifacts present"
+
+      - name: deck.js uninstall + assert cleanup
+        run: |
+          node bin/deck.js uninstall --yes
+          case "$RUNNER_OS" in
+            Linux)   test ! -e "$HOME/.local/share/claude-deck" ;;
+            macOS)   test ! -e "$HOME/Library/Application Support/claude-deck" && test ! -e "$HOME/Library/LaunchAgents/com.claude-deck.server.plist" ;;
+            Windows) test ! -e "$LOCALAPPDATA/claude-deck" ;;
+          esac
+          echo "uninstall left nothing behind"

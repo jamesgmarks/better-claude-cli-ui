@@ -224,8 +224,9 @@ const MAC = {
 </dict></plist>
 `);
     tryRun('launchctl', ['unload', this.plist]);
-    run('launchctl', ['load', '-w', this.plist]);
-    log('  launchd agent loaded (launchctl list | grep claude-deck)');
+    const loaded = tryRun('launchctl', ['load', '-w', this.plist]);
+    if (loaded.status === 0) log('  launchd agent loaded (launchctl list | grep claude-deck)');
+    else log('  launchd agent written; load deferred to next login (headless session?)');
 
     // minimal .app so LaunchServices routes claude-deck:// to us
     const macos = path.join(this.appBundle, 'Contents', 'MacOS');
