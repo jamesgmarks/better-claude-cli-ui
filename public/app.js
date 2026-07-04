@@ -310,8 +310,8 @@ function renderSessionTabs() {
   });
   setChildren(bar, tabs, el('button', {
     class: 'sess-new',
-    title: 'New Claude session in ' + (state?.cwd || 'the current project'),
-    onclick: () => startClaude(),
+    title: 'Pick a folder, then start a new Claude session there',
+    onclick: () => openDirPicker('new-session'),
   }, '+ New'));
   updateDocTitle();
 }
@@ -431,8 +431,8 @@ function startClaude(extra = [], cwdOverride = null) {
   wsSend({ type: 'start', cwd: cwdOverride || state?.cwd, args, cols: 120, rows: 32, profile: state?.activeProfileId });
 }
 
-$('#btn-start').onclick = () => startClaude();
-$('#btn-continue').onclick = () => startClaude(['--continue']);
+$('#btn-start').onclick = () => openDirPicker('new-session');
+$('#btn-continue').onclick = () => openDirPicker('new-session', ['--continue']);
 $('#btn-stop').onclick = () => {
   const t = activeSid && terms.get(activeSid);
   if (!t || t.info?.status === 'exited') { toast('The active tab has no running session'); return; }
@@ -612,6 +612,10 @@ async function applyDeckUpdate(force) {
 // folder picker — the cwd field opens a real directory browser
 // ---------------------------------------------------------------------------
 let dirCurrent = null;
+// 'cwd' just moves the dashboard's working dir; 'new-session' also starts a
+// Claude session in the chosen folder (what the + New tab button uses)
+let dirPickerMode = 'cwd';
+let dirPickerArgs = [];
 
 async function browseTo(p) {
   let r;
@@ -632,7 +636,11 @@ async function browseTo(p) {
   );
 }
 
-function openDirPicker() {
+function openDirPicker(mode = 'cwd', startArgs = []) {
+  dirPickerMode = mode;
+  dirPickerArgs = startArgs;
+  $('#dir-select').textContent = mode !== 'new-session' ? 'Use this folder'
+    : startArgs.includes('--continue') ? '⏩ Use folder & continue' : '▶ Use folder & start';
   const shortcuts = [
     { label: '🏠 home', path: state.home },
     ...(state.knownProjects || []).map(p => ({ label: '📁 ' + (p.split('/').pop() || p), path: p })),
@@ -651,9 +659,17 @@ $('#dir-go').onclick = () => browseTo($('#dir-path').value.trim());
 $('#dir-path').addEventListener('keydown', e => { if (e.key === 'Enter') browseTo($('#dir-path').value.trim()); });
 $('#dir-hidden').onchange = () => dirCurrent && browseTo(dirCurrent);
 $('#dir-select').onclick = e => busy(e.currentTarget, async () => {
+  const chosen = dirCurrent;
   try {
-    await api('POST', '/api/cwd', { cwd: dirCurrent });
-    toast('Working directory: ' + dirCurrent);
+    await api('POST', '/api/cwd', { cwd: chosen });
+    if (dirPickerMode === 'new-session') {
+      // pass the folder explicitly so the session starts there regardless of
+      // when the cwd change propagates back through state
+      startClaude(dirPickerArgs, chosen);
+      toast((dirPickerArgs.includes('--continue') ? 'Continuing in ' : 'New session in ') + chosen);
+    } else {
+      toast('Working directory: ' + chosen);
+    }
     $('#dir-modal').close();
     refreshState();
   } catch (err) { toast(err.message, true); }
