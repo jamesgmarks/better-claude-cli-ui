@@ -3,3 +3,4 @@ node_modules/
 *.pptx
 .command-cache.json
 .deck-token
+__pycache__/

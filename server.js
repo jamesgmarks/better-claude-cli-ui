@@ -1,7 +1,7 @@
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import * as pty from 'node-pty';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -352,6 +352,14 @@ function getState() {
     ...discover(),
     builtinCommands,
     update: updateInfo,
+    server: {
+      installed: process.env.DECK_INSTALLED === '1',
+      appDir: __dirname,
+      pid: process.pid,
+      port: PORT,
+      node: process.version,
+      platform: process.platform,
+    },
     sessions: listSessions(),
     allSessions: listAllSessions(),
     meta: {
@@ -739,6 +747,61 @@ app.post('/api/shutdown', (req, res) => {
   setTimeout(() => process.exit(0), 300);
 });
 
+// ---------------------------------------------------------------------------
+// Server self-management (the "App" card in the UI)
+// ---------------------------------------------------------------------------
+const INSTALLED = process.env.DECK_INSTALLED === '1';
+
+app.post('/api/server/restart', (req, res) => {
+  if (INSTALLED) {
+    // exit(0) is enough: systemd (Restart=always) brings us back on new code
+    res.json({ ok: true, note: 'restarting — back in a few seconds' });
+    console.log('restart requested via API');
+    setTimeout(() => process.exit(0), 300);
+  } else {
+    res.status(400).json({ error: 'running from a checkout (no service manager) — restart it from your terminal' });
+  }
+});
+
+app.post('/api/server/stop', (req, res) => {
+  res.json({ ok: true, note: 'stopping' });
+  console.log('stop requested via API');
+  if (INSTALLED && process.platform === 'linux') {
+    // must go through systemd or Restart=always would just respawn us
+    const p = spawn('systemctl', ['--user', 'stop', 'claude-deck.service'], { detached: true, stdio: 'ignore' });
+    p.unref();
+  } else {
+    setTimeout(() => process.exit(0), 300);
+  }
+});
+
+// kill duplicate tray icons and (when installed) start exactly one
+app.post('/api/server/fix-tray', (req, res) => {
+  if (process.platform !== 'linux') return res.status(400).json({ error: 'tray is linux-only right now' });
+  execFile('pkill', ['-f', 'claude-deck/app/bin/tray.py'], () => {
+    if (INSTALLED) {
+      setTimeout(() => {
+        const p = spawn('python3', [path.join(__dirname, 'bin', 'tray.py')], { detached: true, stdio: 'ignore' });
+        p.unref();
+      }, 500);
+    }
+    res.json({ ok: true, note: INSTALLED ? 'trays cleared; one fresh tray started' : 'trays cleared' });
+  });
+});
+
+app.post('/api/server/uninstall', (req, res) => {
+  if (String(req.body?.confirm) !== 'UNINSTALL') {
+    return res.status(400).json({ error: 'confirmation text mismatch — type UNINSTALL exactly' });
+  }
+  console.log('uninstall requested via API');
+  // detached child with cwd outside the app dir: it survives our shutdown and
+  // can delete the install directory out from under itself safely on POSIX
+  const p = spawn(process.execPath, [path.join(__dirname, 'bin', 'deck.js'), 'uninstall', '--yes'],
+    { detached: true, stdio: 'ignore', cwd: os.tmpdir() });
+  p.unref();
+  res.json({ ok: true, note: 'uninstalling — this page will stop responding' });
+});
+
 app.post('/api/update', async (req, res) => {
   if (!updateInfo.available) return res.status(400).json({ error: 'no update available' });
   if (sessions.size > 0 && !req.body?.force) {
@@ -751,6 +814,20 @@ app.post('/api/update', async (req, res) => {
 app.post('/api/update/check', async (req, res) => {
   await checkForUpdates();
   res.json(updateInfo);
+});
+
+// directory listing for the folder picker (dirs only)
+app.get('/api/browse', (req, res) => {
+  const target = path.resolve(String(req.query.path || HOME).replace(/^~(?=\/|$)/, HOME));
+  try {
+    if (!fs.statSync(target).isDirectory()) throw new Error('not a directory');
+    const dirs = fs.readdirSync(target, { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => ({ name: e.name, path: path.join(target, e.name), hidden: e.name.startsWith('.') }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const parent = path.dirname(target);
+    res.json({ path: target, parent: parent !== target ? parent : null, dirs });
+  } catch (e) { res.status(400).json({ error: String(e.message) }); }
 });
 
 app.post('/api/cwd', (req, res) => {

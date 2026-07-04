@@ -171,6 +171,9 @@ Name=Claude Deck Tray
 Exec=python3 ${APP_DIR}/bin/tray.py
 X-GNOME-Autostart-enabled=true
 `);
+    // reinstalls must not stack tray icons: clear any running tray first
+    // (tray.py also holds a single-instance lock as a second line of defense)
+    tryRun('pkill', ['-f', 'claude-deck/app/bin/tray.py']);
     const tray = spawn('python3', [path.join(APP_DIR, 'bin', 'tray.py')], { detached: true, stdio: 'ignore' });
     tray.unref();
     log('  tray icon installed (starts at login; running now)');

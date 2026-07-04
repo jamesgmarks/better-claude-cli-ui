@@ -6,8 +6,17 @@ Controls the claude-deck systemd --user service and shows its state.
 """
 import os
 import signal
+import socket
 import subprocess
 import urllib.request
+
+# Single instance: hold an abstract unix socket as a lock. It vanishes with
+# the process, so there are no stale lockfiles — a second tray just exits.
+try:
+    _instance_lock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    _instance_lock.bind("\0claude-deck-tray")
+except OSError:
+    raise SystemExit(0)
 
 import gi
 gi.require_version("Gtk", "3.0")

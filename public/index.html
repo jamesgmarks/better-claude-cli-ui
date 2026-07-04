@@ -20,8 +20,7 @@
     </div>
     <div class="cwd-box">
       <label for="cwd-input">cwd</label>
-      <input id="cwd-input" spellcheck="false">
-      <button id="cwd-set" title="Change working directory">Set</button>
+      <input id="cwd-input" readonly title="Click to pick the working directory" aria-haspopup="dialog" spellcheck="false">
     </div>
     <div class="spacer"></div>
     <span id="acct" class="muted"></span>
@@ -73,6 +72,26 @@
       <button id="modal-close">Close</button>
     </div>
     <textarea id="modal-text" aria-label="File content" spellcheck="false"></textarea>
+  </dialog>
+
+  <dialog id="dir-modal" aria-label="Choose working directory">
+    <div class="modal-head">
+      <span>📁 Choose working directory</span>
+      <div class="spacer"></div>
+      <button id="dir-close">Cancel</button>
+    </div>
+    <div class="dir-path-row">
+      <input id="dir-path" aria-label="Path" spellcheck="false">
+      <button id="dir-go" class="tiny">Go</button>
+      <label class="flag"><input type="checkbox" id="dir-hidden"> hidden</label>
+    </div>
+    <div id="dir-shortcuts" class="chips"></div>
+    <div id="dir-list"></div>
+    <div class="modal-foot">
+      <span id="dir-current" class="muted"></span>
+      <div class="spacer"></div>
+      <button id="dir-select" class="primary">Use this folder</button>
+    </div>
   </dialog>
 
   <script src="vendor/xterm/lib/xterm.js"></script>

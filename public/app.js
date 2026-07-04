@@ -481,8 +481,56 @@ async function applyDeckUpdate(force) {
   }
 }
 
-$('#cwd-set').onclick = e =>
-  busy(e.currentTarget, () => mutate(api('POST', '/api/cwd', { cwd: $('#cwd-input').value.trim() }), 'Working directory changed'));
+// ---------------------------------------------------------------------------
+// folder picker — the cwd field opens a real directory browser
+// ---------------------------------------------------------------------------
+let dirCurrent = null;
+
+async function browseTo(p) {
+  let r;
+  try { r = await api('GET', '/api/browse?path=' + encodeURIComponent(p)); }
+  catch (e) { toast(e.message, true); return; }
+  dirCurrent = r.path;
+  $('#dir-path').value = r.path;
+  $('#dir-current').textContent = 'selected: ' + r.path.replace(state?.home || '', '~');
+  const showHidden = $('#dir-hidden').checked;
+  const dirs = r.dirs.filter(d => showHidden || !d.hidden);
+  setChildren($('#dir-list'),
+    r.parent ? el('div', { class: 'dir-item', ...press(() => browseTo(r.parent), 'Go up one folder') },
+      el('span', { class: 'dir-icon' }, '⬆️'), '..') : null,
+    dirs.map(d => el('div', { class: 'dir-item' + (d.hidden ? ' dim' : ''), ...press(() => browseTo(d.path), 'Open ' + d.name) },
+      el('span', { class: 'dir-icon' }, '📁'), d.name)),
+    !dirs.length && !r.parent ? el('div', { class: 'empty' }, 'No subfolders') : null,
+    dirs.length ? null : el('div', { class: 'empty' }, 'No subfolders here — "Use this folder" to select it'),
+  );
+}
+
+function openDirPicker() {
+  const shortcuts = [
+    { label: '🏠 home', path: state.home },
+    ...(state.knownProjects || []).map(p => ({ label: '📁 ' + (p.split('/').pop() || p), path: p })),
+  ];
+  setChildren($('#dir-shortcuts'), shortcuts.map(s =>
+    el('button', { class: 'chip', title: s.path, onclick: () => browseTo(s.path) }, s.label)));
+  $('#dir-modal').showModal();
+  browseTo(state.cwd);
+}
+
+$('#cwd-input').addEventListener('click', openDirPicker);
+$('#cwd-input').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDirPicker(); } });
+$('#dir-close').onclick = () => $('#dir-modal').close();
+$('#dir-modal').addEventListener('click', e => { if (e.target === e.currentTarget) $('#dir-modal').close(); });
+$('#dir-go').onclick = () => browseTo($('#dir-path').value.trim());
+$('#dir-path').addEventListener('keydown', e => { if (e.key === 'Enter') browseTo($('#dir-path').value.trim()); });
+$('#dir-hidden').onchange = () => dirCurrent && browseTo(dirCurrent);
+$('#dir-select').onclick = e => busy(e.currentTarget, async () => {
+  try {
+    await api('POST', '/api/cwd', { cwd: dirCurrent });
+    toast('Working directory: ' + dirCurrent);
+    $('#dir-modal').close();
+    refreshState();
+  } catch (err) { toast(err.message, true); }
+});
 
 // --- card infrastructure (open/closed persisted) ---
 const openCards = new Set(JSON.parse(localStorage.getItem('openCards') || '["quick","core","permissions","mcp"]'));
@@ -536,7 +584,51 @@ function renderDash() {
     cardCatalog('skills', '🎯 Skills'),
     cardMemory(),
     cardProject(),
+    cardServer(),
     cardRaw(),
+  );
+}
+
+// --- the Deck itself: where it runs, restart/stop/uninstall ---
+function cardServer() {
+  const srv = state.server || {};
+  const kv = (k, v) => el('div', { class: 'kv' }, el('span', { class: 'k' }, k + ' '), String(v ?? '—'));
+  const act = (path, body, okMsg) => e => busy(e.currentTarget, async () => {
+    try { const r = await api('POST', path, body); toast(r.note || okMsg); }
+    catch (err) { toast(err.message, true); }
+  });
+  return card('server', '🖥️ App (this Deck)', null,
+    el('div', { class: 'row' },
+      el('span', { class: 'badge ' + (srv.installed ? 'allow' : 'ask') },
+        srv.installed ? 'installed service' : 'dev checkout'),
+      state.update?.available ? el('span', { class: 'badge deny' }, `update: ${state.update.behind} behind`) : null,
+    ),
+    kv('app dir', srv.appDir),
+    kv('server', `pid ${srv.pid} · port ${srv.port} · node ${srv.node}`),
+    el('div', { class: 'row', style: 'margin-top:10px' },
+      el('button', {
+        class: 'tiny', title: 'Sessions end but stay resumable from the Conversations tab',
+        onclick: e => { if (confirm('Restart the Deck server? Running Claude sessions end (they stay resumable).')) act('/api/server/restart', {}, 'Restarting…')(e); },
+      }, '↻ Restart server'),
+      el('button', {
+        class: 'tiny', title: 'Stops the server; start it again from the tray icon or `systemctl --user start claude-deck`',
+        onclick: e => { if (confirm('Stop the Deck server? This page will go dead until you start it again (tray icon or systemctl).')) act('/api/server/stop', {}, 'Stopping…')(e); },
+      }, '■ Stop server'),
+      srv.platform === 'linux' ? el('button', {
+        class: 'tiny', title: 'Kills duplicate tray icons and starts exactly one',
+        onclick: act('/api/server/fix-tray', {}, 'Tray fixed'),
+      }, '🧹 Fix tray icons') : null,
+      el('button', {
+        class: 'tiny danger', title: 'Removes the service, tray, URL handler, and the installed app. Your Claude config and conversations are untouched.',
+        onclick: e => {
+          const typed = prompt('This removes the Claude Deck service, tray icon, and installed app.\nYour Claude config and conversations are NOT touched.\n\nType UNINSTALL to confirm:');
+          if (typed === null) return;
+          if (typed !== 'UNINSTALL') { toast('Not uninstalled — confirmation text did not match', true); return; }
+          act('/api/server/uninstall', { confirm: 'UNINSTALL' }, 'Uninstalling…')(e);
+        },
+      }, '🗑 Uninstall…'),
+    ),
+    el('div', { class: 'hint' }, 'Uninstalling removes the Deck itself only — ~/.claude, your settings, and every conversation stay on disk.'),
   );
 }
 
