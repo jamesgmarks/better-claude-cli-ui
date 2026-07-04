@@ -183,6 +183,17 @@ function ensureTerm(info) {
     wsSend({ type: 'input', sid: info.sid, data: d });
   });
   const t = { term, fit, div, info };
+  // Refit whenever THIS terminal's div gains a real size. A hidden tab has size
+  // 0; activating it flips 0 -> real width, which fires this and fits at exactly
+  // the moment the panel has laid out — fixing the "compressed to 1 column after
+  // reload" case that the panel-level ResizeObserver misses (switching tabs
+  // doesn't change #terminal's size, so it never refires).
+  t.ro = new ResizeObserver(() => {
+    if (activeSid !== info.sid || !div.clientWidth || !div.clientHeight) return;
+    t.fit.fit();
+    if (term.cols > 0) wsSend({ type: 'resize', sid: info.sid, cols: term.cols, rows: term.rows });
+  });
+  t.ro.observe(div);
   terms.set(info.sid, t);
   updateEmptyState();
   return { t, isNew: true };
@@ -191,6 +202,7 @@ function ensureTerm(info) {
 function removeTerm(sid) {
   const t = terms.get(sid);
   if (!t) return;
+  t.ro?.disconnect();
   t.term.dispose();
   t.div.remove();
   terms.delete(sid);
