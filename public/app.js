@@ -425,7 +425,7 @@ function startClaude(extra = [], cwdOverride = null) {
 }
 
 $('#btn-start').onclick = () => openDirPicker('new-session');
-$('#btn-continue').onclick = () => startClaude(['--continue']);
+$('#btn-continue').onclick = () => openDirPicker('new-session', ['--continue']);
 $('#btn-stop').onclick = () => {
   const t = activeSid && terms.get(activeSid);
   if (!t || t.info?.status === 'exited') { toast('The active tab has no running session'); return; }
@@ -587,6 +587,7 @@ let dirCurrent = null;
 // 'cwd' just moves the dashboard's working dir; 'new-session' also starts a
 // Claude session in the chosen folder (what the + New tab button uses)
 let dirPickerMode = 'cwd';
+let dirPickerArgs = [];
 
 async function browseTo(p) {
   let r;
@@ -607,9 +608,11 @@ async function browseTo(p) {
   );
 }
 
-function openDirPicker(mode = 'cwd') {
+function openDirPicker(mode = 'cwd', startArgs = []) {
   dirPickerMode = mode;
-  $('#dir-select').textContent = mode === 'new-session' ? '▶ Use folder & start' : 'Use this folder';
+  dirPickerArgs = startArgs;
+  $('#dir-select').textContent = mode !== 'new-session' ? 'Use this folder'
+    : startArgs.includes('--continue') ? '⏩ Use folder & continue' : '▶ Use folder & start';
   const shortcuts = [
     { label: '🏠 home', path: state.home },
     ...(state.knownProjects || []).map(p => ({ label: '📁 ' + (p.split('/').pop() || p), path: p })),
@@ -634,8 +637,8 @@ $('#dir-select').onclick = e => busy(e.currentTarget, async () => {
     if (dirPickerMode === 'new-session') {
       // pass the folder explicitly so the session starts there regardless of
       // when the cwd change propagates back through state
-      startClaude([], chosen);
-      toast('New session in ' + chosen);
+      startClaude(dirPickerArgs, chosen);
+      toast((dirPickerArgs.includes('--continue') ? 'Continuing in ' : 'New session in ') + chosen);
     } else {
       toast('Working directory: ' + chosen);
     }
