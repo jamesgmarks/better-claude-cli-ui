@@ -365,3 +365,13 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
     scroll-behavior: auto !important;
   }
 }
+
+/* ---------- update banner ---------- */
+#update-banner {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 6px 14px;
+  background: #1d2a1f;
+  border-bottom: 1px solid var(--accent-dim);
+  color: var(--text);
+  font-size: 12px;
+}

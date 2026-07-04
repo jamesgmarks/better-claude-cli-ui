@@ -14,6 +14,23 @@ Design follows the [ui-ux-pro-max](https://github.com/nextlevelbuilder/ui-ux-pro
 
 ## Run it
 
+**Install as a service (Linux)** — one command, no clone needed:
+
+```bash
+npx github:amirbukhari/better-claude-cli-ui install
+```
+
+This clones the app to `~/.local/share/claude-deck/app`, runs it as a `systemd --user` service (auto-restarts), and registers the `claude-deck://` URL scheme so the [GitHub Pages frontend](https://amirbukhari.github.io/better-claude-cli-ui/) can wake it with one click ("🚀 Open my Deck").
+
+```bash
+npx github:amirbukhari/better-claude-cli-ui uninstall   # removes service, URL handler, app dir — nothing else
+npx github:amirbukhari/better-claude-cli-ui status
+```
+
+**Updates:** the server checks `origin/main` every 6 hours (and on boot). When you push to the repo, installed copies auto-update and restart **only if no Claude sessions are running**; otherwise the UI shows an "Update available" banner with a one-click apply (sessions are killed but stay resumable).
+
+**Or run from a checkout:**
+
 ```bash
 npm install        # see "old GCC" note below if node-pty fails to build
 npm start          # http://127.0.0.1:3456

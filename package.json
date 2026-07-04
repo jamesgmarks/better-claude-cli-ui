@@ -1,11 +1,13 @@
 {
   "name": "better-claude-cli-ui",
   "version": "0.1.0",
-  "description": "Amir Hates The Claude CLI UI — dashboard + real claude terminal, nothing hidden",
+  "description": "Amir Hates The Claude CLI UI \u2014 dashboard + real claude terminal, nothing hidden",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "install-service": "node bin/deck.js install",
+    "uninstall-service": "node bin/deck.js uninstall"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
@@ -13,5 +15,8 @@
     "express": "^4.21.2",
     "node-pty": "^1.1.0",
     "ws": "^8.18.0"
+  },
+  "bin": {
+    "claude-deck": "bin/deck.js"
   }
 }

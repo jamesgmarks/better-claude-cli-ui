@@ -351,6 +351,7 @@ function getState() {
     keybindings: { path: p.keybindings, ...readJsonFile(p.keybindings) },
     ...discover(),
     builtinCommands,
+    update: updateInfo,
     sessions: listSessions(),
     allSessions: listAllSessions(),
     meta: {
@@ -386,6 +387,66 @@ function updateSettings(scope, mutate) {
   mutate(json);
   writeFileSafe(file, JSON.stringify(json, null, 2) + '\n');
 }
+
+// ---------------------------------------------------------------------------
+// Self-update: this checkout is a git clone, so an update is just git pull.
+// We check origin/main periodically and expose the result in /api/state.
+// Installed copies (DECK_INSTALLED=1, run under systemd Restart=always)
+// auto-apply ONLY when no claude sessions are running; otherwise the UI
+// shows an "update ready" banner and the user applies it with one click.
+// ---------------------------------------------------------------------------
+let updateInfo = { available: false, local: null, remote: null, behind: 0, checkedAt: null };
+
+function gitHere(args) {
+  return new Promise(resolve => {
+    execFile('git', args, { cwd: __dirname, timeout: 30_000 }, (err, stdout) =>
+      resolve(err ? null : stdout.trim()));
+  });
+}
+
+async function checkForUpdates() {
+  if (await gitHere(['rev-parse', '--is-inside-work-tree']) !== 'true') return;
+  if (await gitHere(['fetch', '--quiet', 'origin', 'main']) === null) return; // offline is fine
+  const [local, remote, behind] = await Promise.all([
+    gitHere(['rev-parse', '--short', 'HEAD']),
+    gitHere(['rev-parse', '--short', 'origin/main']),
+    gitHere(['rev-list', '--count', 'HEAD..origin/main']),
+  ]);
+  updateInfo = {
+    available: !!local && !!remote && local !== remote && Number(behind) > 0,
+    local, remote, behind: Number(behind) || 0,
+    checkedAt: Date.now(),
+  };
+  if (updateInfo.available) {
+    console.log(`update available: ${local} -> ${remote} (${behind} commit(s) behind)`);
+    broadcastEvent({ type: 'state' });
+    // installed + idle -> apply silently; systemd restarts us on the new code
+    if (process.env.DECK_INSTALLED === '1' && sessions.size === 0) applyUpdate();
+  }
+}
+
+let updating = false;
+async function applyUpdate() {
+  if (updating) return { ok: false, error: 'update already in progress' };
+  updating = true;
+  console.log('applying update: git pull + npm install…');
+  if (await gitHere(['pull', '--ff-only', 'origin', 'main']) === null) {
+    updating = false;
+    return { ok: false, error: 'git pull failed — check the server log' };
+  }
+  await new Promise(resolve => {
+    const shim = path.join(__dirname, 'tools', 'g++20-shim');
+    const env = fs.existsSync(shim) ? { ...process.env, CXX: shim } : process.env;
+    execFile('npm', ['install', '--omit=dev', '--no-fund', '--no-audit'],
+      { cwd: __dirname, timeout: 300_000, env }, () => resolve());
+  });
+  console.log('update applied — exiting so the service manager restarts on the new code');
+  setTimeout(() => process.exit(0), 400); // under systemd Restart=always this is a relaunch
+  return { ok: true, restarting: true };
+}
+
+setTimeout(checkForUpdates, 15_000);            // shortly after boot
+setInterval(checkForUpdates, 6 * 3600 * 1000);  // then every 6 hours
 
 // ---------------------------------------------------------------------------
 // PTY sessions — multiple concurrent claude processes, one per tab in the UI
@@ -666,6 +727,20 @@ app.get('/api/git/show', async (req, res) => {
   const out = await git(['show', '--stat', '--patch', '--no-color', hash]);
   if (out === null) return res.status(404).json({ error: 'git show failed' });
   res.json({ text: out.slice(0, 200_000), truncated: out.length > 200_000 });
+});
+
+app.post('/api/update', async (req, res) => {
+  if (!updateInfo.available) return res.status(400).json({ error: 'no update available' });
+  if (sessions.size > 0 && !req.body?.force) {
+    return res.status(409).json({ error: `${sessions.size} claude session(s) running — applying restarts them (they stay resumable)`, needsForce: true });
+  }
+  const r = await applyUpdate();
+  res.status(r.ok ? 200 : 500).json(r);
+});
+
+app.post('/api/update/check', async (req, res) => {
+  await checkForUpdates();
+  res.json(updateInfo);
 });
 
 app.post('/api/cwd', (req, res) => {

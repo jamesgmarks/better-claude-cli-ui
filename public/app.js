@@ -105,9 +105,15 @@ function showConnectHelp(err) {
     el('div', { class: 'card open' },
       el('div', { class: 'card-head' }, '🔌 Connect to your machine'),
       el('div', { class: 'card-body' },
-        el('div', { class: 'hint' }, `This page is static — it needs your local server. (${err})`),
-        el('div', { class: 'hint' }, '1. On your machine run: npm start (in the better-claude-cli-ui repo)'),
-        el('div', { class: 'hint' }, '2. Copy the ?server=…&token=… URL it prints, or paste the values here:'),
+        el('div', { class: 'hint' }, `This page is static — it needs the Deck server on your machine. (${err})`),
+        el('div', { class: 'subhead' }, 'Already installed?'),
+        el('div', { class: 'row' }, el('a', { href: 'claude-deck://open', class: 'chip' }, '🚀 Open my Deck'),
+          el('span', { class: 'hint' }, 'wakes the local server via the claude-deck:// handler')),
+        el('div', { class: 'subhead' }, 'First time? One command installs it (service + one-click opens):'),
+        el('pre', { class: 'mini' }, 'npx github:amirbukhari/better-claude-cli-ui install'),
+        el('div', { class: 'hint' }, 'Uninstall just as easily: npx github:amirbukhari/better-claude-cli-ui uninstall'),
+        el('div', { class: 'subhead' }, 'Then connect'),
+        el('div', { class: 'hint' }, 'Copy the ?server=…&token=… URL the installer prints, or paste the values here:'),
         el('div', { class: 'row' }, el('label', {}, 'Server'), srvIn),
         el('div', { class: 'row' }, el('label', {}, 'Token'), tokIn),
         el('div', { class: 'row' }, el('button', {
@@ -442,6 +448,37 @@ function renderTopbar() {
   $('#version').textContent = state.claudeVersion || '';
   $('#acct').textContent = state.account ? `${state.account.email} · ${state.account.organization ?? ''}` : '';
   if (document.activeElement !== $('#cwd-input')) $('#cwd-input').value = state.cwd;
+  renderUpdateBanner();
+}
+
+// "new version pushed to the repo" banner — appears under the topbar
+function renderUpdateBanner() {
+  let banner = $('#update-banner');
+  const u = state.update;
+  if (!u?.available) { banner?.remove(); return; }
+  if (!banner) {
+    banner = el('div', { id: 'update-banner', role: 'status' });
+    $('#topbar').after(banner);
+  }
+  setChildren(banner,
+    el('span', {}, `⬆ Deck update available: ${u.local} → ${u.remote} (${u.behind} commit${u.behind === 1 ? '' : 's'} behind)`),
+    el('button', {
+      class: 'tiny primary', onclick: e => busy(e.currentTarget, () => applyDeckUpdate(false)),
+    }, 'Update & restart server'),
+    el('span', { class: 'hint' }, 'live sessions are killed but stay resumable from Conversations'),
+  );
+}
+
+async function applyDeckUpdate(force) {
+  try {
+    const r = await api('POST', '/api/update', { force });
+    if (r.restarting) toast('Updating — the server restarts itself; this page reconnects automatically');
+  } catch (e) {
+    if (/session\(s\) running/.test(e.message) && confirm(e.message + '\n\nApply anyway?')) {
+      return applyDeckUpdate(true);
+    }
+    toast(e.message, true);
+  }
 }
 
 $('#cwd-set').onclick = e =>
