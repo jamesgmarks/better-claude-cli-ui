@@ -634,6 +634,7 @@ function renderTopbar() {
   if (document.activeElement !== $('#cwd-input')) $('#cwd-input').value = state.cwd;
   renderProfiles();
   renderUpdateBanner();
+  renderRestoreBanner();
 }
 
 // profile picker: hidden entirely for single-profile setups (the common case),
@@ -684,6 +685,39 @@ async function applyDeckUpdate(force) {
     }
     toast(e.message, true);
   }
+}
+
+// ---------------------------------------------------------------------------
+// restore banner — offers to reopen sessions that were live before a restart
+// ---------------------------------------------------------------------------
+function renderRestoreBanner() {
+  let banner = $('#restore-banner');
+  const list = state.pendingRestore || [];
+  if (!list.length) { banner?.remove(); return; }
+  if (!banner) {
+    banner = el('div', { id: 'restore-banner', role: 'status' });
+    $('#topbar').after(banner);
+  }
+  const n = list.length;
+  setChildren(banner,
+    el('span', {}, `↻ ${n} session${n === 1 ? '' : 's'} were open before the last restart: ${list.map(s => shortDir(s.cwd)).join(', ')}`),
+    el('button', { class: 'tiny primary', onclick: e => busy(e.currentTarget, restoreSessions) }, 'Restore all'),
+    el('button', { class: 'tiny', onclick: e => busy(e.currentTarget, dismissRestore) }, 'Dismiss'),
+    el('span', { class: 'hint' }, 'reopens each folder with --continue'),
+  );
+}
+
+async function restoreSessions() {
+  try {
+    const r = await api('POST', '/api/sessions/restore');
+    toast(`Restoring ${r.started} session${r.started === 1 ? '' : 's'}…`);
+    refreshState();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function dismissRestore() {
+  try { await api('POST', '/api/sessions/restore/dismiss'); refreshState(); }
+  catch (e) { toast(e.message, true); }
 }
 
 // ---------------------------------------------------------------------------

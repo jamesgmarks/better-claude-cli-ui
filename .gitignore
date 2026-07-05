@@ -4,3 +4,4 @@ node_modules/
 .command-cache.json
 .deck-token
 __pycache__/
+.DS_Store
