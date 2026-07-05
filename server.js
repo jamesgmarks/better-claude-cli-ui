@@ -971,6 +971,28 @@ app.post('/api/cwd', (req, res) => {
   } catch (e) { res.status(400).json({ error: String(e.message) }); }
 });
 
+// open a session's folder in VS Code. Tries the `code` CLI; on macOS falls back
+// to `open -a` if `code` isn't on PATH. Fire-and-forget / detached.
+app.post('/api/open-editor', (req, res) => {
+  const raw = String(req.body?.cwd || '');
+  if (!raw) return res.status(400).json({ error: 'cwd required' });
+  let resolved;
+  try {
+    resolved = path.resolve(raw.replace(/^~(?=\/|$)/, HOME));
+    if (!fs.statSync(resolved).isDirectory()) throw new Error('not a directory');
+  } catch (e) { return res.status(400).json({ error: String(e.message) }); }
+  const launch = (cmd, args) => {
+    const p = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+    p.unref();
+    return p;
+  };
+  const p = launch('code', [resolved]);
+  p.on('error', () => {
+    if (process.platform === 'darwin') launch('open', ['-a', 'Visual Studio Code', resolved]).on('error', () => {});
+  });
+  res.json({ ok: true, cwd: resolved });
+});
+
 // switch which profile the dashboard reflects (config, memory, chats, account).
 // re-discovers first so profiles created since startup show up.
 app.post('/api/profile', (req, res) => {
