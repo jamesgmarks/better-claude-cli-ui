@@ -228,6 +228,10 @@ function activateSession(sid) {
   requestAnimationFrame(() => {
     t.fit.fit();
     wsSend({ type: 'resize', sid, cols: t.term.cols, rows: t.term.rows });
+    // A tab that was display:none leaves xterm's renderer dormant; if the fit
+    // didn't change dimensions there's no auto-redraw, so the just-shown tab can
+    // paint a stale canvas until a manual resize forces it. Force the repaint.
+    t.term.refresh(0, t.term.rows - 1);
     t.term.focus();
   });
   renderSessionTabs();
@@ -241,6 +245,41 @@ function activateSession(sid) {
     sync.push(api('POST', '/api/cwd', { cwd: t.info.cwd }));
   if (sync.length) Promise.all(sync).then(refreshState).catch(() => {});
 }
+
+// ---------------------------------------------------------------------------
+// Tab-by-number shortcuts — browser convention: 1-8 select that tab, 9 = last.
+// A browser tab reserves Cmd/Ctrl+number for its OWN tabs, so in a normal tab
+// the tab-safe modifier does the work (Ctrl on Mac, Alt on Win/Linux); we also
+// accept the native Cmd/Ctrl so it "just works" as a standalone/PWA window,
+// where those accelerators actually reach the page. Matched on e.code so that
+// Option+digit (which reports e.key "¡" etc. on Mac) still maps to its number.
+// Numbering follows the on-screen order (orderedTerms), so it tracks auto-focus.
+// ---------------------------------------------------------------------------
+const IS_MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform) || /Mac/.test(navigator.userAgent);
+window.addEventListener('keydown', e => {
+  const m = /^Digit([1-9])$/.exec(e.code);
+  if (!m || e.shiftKey) return;
+  const mod = IS_MAC ? (e.ctrlKey || e.metaKey) : (e.ctrlKey || e.altKey);
+  if (!mod) return;
+  const order = orderedTerms();
+  if (!order.length) return;
+  const n = Number(m[1]);
+  const idx = n === 9 ? order.length - 1 : n - 1; // 9 always jumps to the last tab
+  if (idx >= order.length) return;                // 1-8 past the tab count: no-op
+  e.preventDefault();
+  e.stopPropagation();
+  activateSession(order[idx][0]);
+}, true); // capture phase so we win before the terminal (xterm) sees the keys
+
+// While that modifier is held, reveal each tab's number (like iTerm/browsers do).
+function syncTabNumberHint(e) {
+  const on = IS_MAC ? (e.ctrlKey || e.metaKey) : (e.ctrlKey || e.altKey);
+  $('#session-tabs')?.classList.toggle('show-tab-numbers', on);
+}
+window.addEventListener('keydown', syncTabNumberHint);
+window.addEventListener('keyup', syncTabNumberHint);
+// releasing the key outside the window (blur/alt-tab) would strand the hint on
+window.addEventListener('blur', () => $('#session-tabs')?.classList.remove('show-tab-numbers'));
 
 // ---------------------------------------------------------------------------
 // auto-focus (opt-in): waiting tabs sort to the front; when the active
@@ -297,18 +336,23 @@ function activityOf(info) {
 
 function renderSessionTabs() {
   const bar = $('#session-tabs');
-  const tabs = orderedTerms().map(([sid, t]) => {
+  const order = orderedTerms();
+  const tabs = order.map(([sid, t], i) => {
     const info = t.info || {};
     const act = activityOf(info);
     const ui = ACTIVITY_UI[act] || ACTIVITY_UI.working;
     const flavor = info.args?.includes('--continue') ? '⏩ ' : info.args?.includes('--resume') ? '⟲ ' : '';
     // show which account a tab runs under, but only when more than one exists
     const prof = (state?.profiles?.length > 1) && state.profiles.find(p => p.id === info.profile);
+    // number to press with the modifier held (revealed via #session-tabs.show-tab-numbers):
+    // mirrors the shortcut — 1-8 by position, and 9 for the last tab beyond that.
+    const kbdNum = i < 8 ? i + 1 : (i === order.length - 1 ? 9 : null);
     return el('div', {
       class: 'sess-tab' + (sid === activeSid ? ' active' : '') + (act === 'exited' ? ' dead' : '') + ' act-' + ui.cls,
       title: `${ui.hint}\n${info.cwd || ''}${prof ? '\nprofile: ' + prof.label : ''}${info.args?.length ? '\nclaude ' + info.args.join(' ') : ''}`,
       ...press(() => activateSession(sid), `Switch to session in ${shortDir(info.cwd)} (${ui.label})`),
     },
+      kbdNum != null ? el('span', { class: 'sess-num', 'aria-hidden': 'true' }, String(kbdNum)) : null,
       el('span', { class: 'sess-dot ' + ui.cls, 'aria-hidden': 'true' }),
       prof ? el('span', { class: 'sess-prof' }, prof.label) : null,
       el('span', { class: 'sess-label' }, `${flavor}${shortDir(info.cwd)}`),

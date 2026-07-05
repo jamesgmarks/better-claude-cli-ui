@@ -123,6 +123,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 #session-tabs:empty { display: none; }
 .sess-tab {
+  position: relative; /* anchor for the keyboard-number badge overlay */
   display: flex; align-items: center; gap: 7px;
   padding: 4px 6px 4px 10px;
   border: 1px solid var(--border); border-bottom: none;
@@ -131,6 +132,17 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   cursor: pointer; user-select: none;
   max-width: 220px;
 }
+/* number to press while Cmd/Ctrl is held; overlaid so it doesn't reflow the bar */
+.sess-num {
+  position: absolute; top: -7px; left: -5px;
+  min-width: 15px; height: 15px; padding: 0 3px;
+  display: none; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; line-height: 1;
+  color: var(--on-accent); background: var(--accent);
+  border-radius: 8px; box-shadow: 0 1px 3px rgba(0, 0, 0, .45);
+  pointer-events: none; z-index: 3;
+}
+#session-tabs.show-tab-numbers .sess-num { display: inline-flex; }
 .sess-tab.active { background: #0B1120; color: var(--text); border-color: var(--accent-dim); position: relative; top: 1px; }
 .sess-tab.dead { opacity: .55; }
 .sess-tab:hover { color: var(--text); }
