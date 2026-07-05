@@ -434,3 +434,12 @@ dialog#dir-modal[open] { display: flex; }
   color: var(--text);
   font-size: 12px;
 }
+
+#restore-banner {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 6px 14px;
+  background: #172033;
+  border-bottom: 1px solid var(--focus);
+  color: var(--text);
+  font-size: 12px;
+}
