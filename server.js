@@ -408,6 +408,8 @@ function getState() {
     profiles: profiles.map(({ id, label, configDir, isDefault }) => ({ id, label, configDir, isDefault })),
     activeProfileId,
     terminal: { sessions: sessionList() },
+    // sessions that were live before the last restart, offered for one-click restore
+    pendingRestore: pendingRestore.map(s => ({ cwd: s.cwd, profile: s.profile })),
     account: cj.oauthAccount ? {
       email: cj.oauthAccount.emailAddress,
       organization: cj.oauthAccount.organizationName,
@@ -552,6 +554,50 @@ const SCROLLBACK_MAX = 400_000;
 const sessions = new Map(); // sid -> { pty, cwd, args, scrollback, status, pid, createdAt }
 let sidCounter = 0;
 const termClients = new Set();
+
+// ---------------------------------------------------------------------------
+// Session restore across restarts. The server owns the PTYs, so a restart kills
+// them — but Claude persists each conversation, so we can re-open them with
+// --continue. We keep a snapshot of the live set on disk (rewritten on every
+// change, since a kill -9 gives no shutdown hook) and, on the next startup,
+// offer them back via a one-click banner (never auto-spawned).
+// ---------------------------------------------------------------------------
+const SESSION_SNAPSHOT_FILE = path.join(HOME, '.claude-deck-sessions.json');
+let pendingRestore = []; // [{ cwd, profile, args }] from the previous run, offered to the UI
+
+function saveSessionSnapshot() {
+  try {
+    const live = [...sessions.values()]
+      .filter(s => s.status !== 'exited')
+      .map(s => ({ cwd: s.cwd, profile: s.profile, args: s.args }));
+    fs.writeFileSync(SESSION_SNAPSHOT_FILE, JSON.stringify({ savedAt: Date.now(), sessions: live }));
+  } catch {}
+}
+
+// read once at startup — the sessions that were live before this process began
+function loadPendingRestore() {
+  try {
+    const snap = JSON.parse(fs.readFileSync(SESSION_SNAPSHOT_FILE, 'utf8'));
+    pendingRestore = (Array.isArray(snap?.sessions) ? snap.sessions : [])
+      .filter(s => s && s.cwd && fs.existsSync(s.cwd));
+  } catch { pendingRestore = []; }
+}
+
+// force a resume regardless of the original flags: drop any continue/resume/
+// session-id (and its value), keep the rest (e.g. --dangerously-skip-permissions)
+function restoreArgs(args = []) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '-c' || a === '--continue') continue;
+    if (a === '-r' || a === '--resume' || a === '--session-id') {
+      if (args[i + 1] && !args[i + 1].startsWith('-')) i++; // skip its value too
+      continue;
+    }
+    out.push(a);
+  }
+  return ['--continue', ...out];
+}
 const eventClients = new Set();
 
 function broadcastTerm(msg) {
@@ -618,6 +664,7 @@ function startSession({ cwd: dir, args = [], cols = 120, rows = 32, profile: pro
   });
   const sess = { pty: proc, cwd: resolved, args, scrollback: '', status: 'running', pid: proc.pid, createdAt: Date.now(), profile: prof.id };
   sessions.set(sid, sess);
+  saveSessionSnapshot();
   proc.onData(d => {
     sess.scrollback = (sess.scrollback + d).slice(-SCROLLBACK_MAX);
     sess.lastDataAt = Date.now();
@@ -625,6 +672,7 @@ function startSession({ cwd: dir, args = [], cols = 120, rows = 32, profile: pro
   });
   proc.onExit(({ exitCode }) => {
     sess.status = 'exited';
+    saveSessionSnapshot();
     broadcastTerm({ type: 'exit', sid, code: exitCode });
     broadcastEvent({ type: 'state' });
   });
@@ -641,6 +689,7 @@ function killSession(sid, remove = false) {
     s.status = 'exited';
   }
   if (remove) sessions.delete(sid);
+  saveSessionSnapshot();
 }
 
 // ---------------------------------------------------------------------------
@@ -971,6 +1020,29 @@ app.post('/api/cwd', (req, res) => {
   } catch (e) { res.status(400).json({ error: String(e.message) }); }
 });
 
+// bring back the sessions that were live before the last restart (one-click, from
+// the banner). Re-opens each folder with --continue; skips any already running.
+app.post('/api/sessions/restore', (req, res) => {
+  const live = new Set([...sessions.values()]
+    .filter(s => s.status !== 'exited').map(s => s.profile + '\0' + s.cwd));
+  let started = 0;
+  for (const item of pendingRestore) {
+    if (live.has((item.profile || '') + '\0' + item.cwd)) continue;
+    try { startSession({ cwd: item.cwd, profile: item.profile, args: restoreArgs(item.args) }); started++; }
+    catch {}
+  }
+  pendingRestore = [];
+  broadcastEvent({ type: 'state' });
+  res.json({ ok: true, started });
+});
+
+// dismiss the restore offer without re-opening anything
+app.post('/api/sessions/restore/dismiss', (req, res) => {
+  pendingRestore = [];
+  broadcastEvent({ type: 'state' });
+  res.json({ ok: true });
+});
+
 // switch which profile the dashboard reflects (config, memory, chats, account).
 // re-discovers first so profiles created since startup show up.
 app.post('/api/profile', (req, res) => {
@@ -1043,8 +1115,10 @@ wssEvents.on('connection', ws => {
 });
 
 const PAGES_URL = process.env.DECK_PAGES_URL || 'https://amirbukhari.github.io/better-claude-cli-ui/';
+loadPendingRestore(); // offer any sessions that were live before this restart
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Amir Hates The Claude CLI UI — running locally at http://127.0.0.1:${PORT}  (cwd: ${cwd})`);
+  if (pendingRestore.length) console.log(`${pendingRestore.length} session(s) can be restored from the previous run`);
   if (profiles.length > 1) {
     console.log(`profiles: ${profiles.map(p => p.label + (p.isDefault ? ' (default)' : '')).join(', ')}`);
   }
