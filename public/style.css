@@ -107,6 +107,18 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 #terminal { flex: 1; min-height: 0; position: relative; background: #0B1120; }
 .term-instance { position: absolute; inset: 6px 0 6px 8px; }
 .term-instance .xterm { height: 100%; }
+/* faint "open in VS Code" overlay, bottom-right; only prominent on hover so it
+   never obscures terminal content underneath it */
+.term-vscode {
+  position: absolute; bottom: 8px; right: 12px; z-index: 5;
+  width: 30px; height: 30px; padding: 5px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(11, 17, 32, .6); border: 1px solid var(--border);
+  border-radius: 8px; cursor: pointer;
+  opacity: .25; transition: opacity .12s ease;
+}
+.term-vscode:hover, .term-vscode:focus-visible { opacity: 1; }
+.term-vscode svg { width: 100%; height: 100%; display: block; }
 #term-empty {
   position: absolute; inset: 0;
   display: flex; flex-direction: column; justify-content: center; align-items: center;
