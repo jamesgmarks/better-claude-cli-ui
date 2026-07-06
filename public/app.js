@@ -529,12 +529,12 @@ $('#flag-autofocus').onchange = e => {
 };
 
 // start a NEW session tab; never touches the ones already running
-function startClaude(extra = [], cwdOverride = null) {
+function startClaude(extra = [], cwdOverride = null, profileOverride = null) {
   const args = [...extra];
   if ($('#flag-skip').checked) args.push('--dangerously-skip-permissions');
   const typed = $('#extra-args').value.trim();
   if (typed) args.push(...typed.split(/\s+/));
-  wsSend({ type: 'start', cwd: cwdOverride || state?.cwd, args, cols: 120, rows: 32, profile: state?.activeProfileId });
+  wsSend({ type: 'start', cwd: cwdOverride || state?.cwd, args, cols: 120, rows: 32, profile: profileOverride || state?.activeProfileId });
 }
 
 $('#btn-start').onclick = () => openDirPicker('new-session');
@@ -781,6 +781,17 @@ function openDirPicker(mode = 'cwd', startArgs = []) {
   dirPickerArgs = startArgs;
   $('#dir-select').textContent = mode !== 'new-session' ? 'Use this folder'
     : startArgs.includes('--continue') ? '⏩ Use folder & continue' : '▶ Use folder & start';
+  // On a multi-profile machine, let the new session pick its own account here,
+  // independent of the dashboard's active profile. Hidden for plain cwd moves
+  // and single-profile setups (the common case).
+  const profSel = $('#dir-profile-select'), profs = state.profiles || [];
+  const showProf = mode === 'new-session' && profs.length > 1;
+  $('#dir-profile-row').hidden = !showProf;
+  if (showProf) {
+    setChildren(profSel, ...profs.map(p =>
+      el('option', { value: p.id }, p.isDefault && p.label !== 'default' ? `${p.label} · default` : p.label)));
+    profSel.value = state.activeProfileId;
+  }
   const shortcuts = [
     { label: '🏠 home', path: state.home },
     ...(state.knownProjects || []).map(p => ({ label: '📁 ' + (p.split('/').pop() || p), path: p })),
@@ -800,13 +811,17 @@ $('#dir-path').addEventListener('keydown', e => { if (e.key === 'Enter') browseT
 $('#dir-hidden').onchange = () => dirCurrent && browseTo(dirCurrent);
 $('#dir-select').onclick = e => busy(e.currentTarget, async () => {
   const chosen = dirCurrent;
+  const profileId = $('#dir-profile-row').hidden ? null : $('#dir-profile-select').value;
   try {
     await api('POST', '/api/cwd', { cwd: chosen });
     if (dirPickerMode === 'new-session') {
-      // pass the folder explicitly so the session starts there regardless of
-      // when the cwd change propagates back through state
-      startClaude(dirPickerArgs, chosen);
-      toast((dirPickerArgs.includes('--continue') ? 'Continuing in ' : 'New session in ') + chosen);
+      // pass the folder (and profile) explicitly so the session starts there
+      // regardless of when the cwd change propagates back through state
+      startClaude(dirPickerArgs, chosen, profileId);
+      const prof = profileId && profileId !== state.activeProfileId
+        && (state.profiles || []).find(p => p.id === profileId);
+      toast((dirPickerArgs.includes('--continue') ? 'Continuing in ' : 'New session in ')
+        + chosen + (prof ? ` · ${prof.label}` : ''));
     } else {
       toast('Working directory: ' + chosen);
     }

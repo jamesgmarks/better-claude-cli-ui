@@ -420,6 +420,12 @@ dialog#dir-modal[open] { display: flex; }
   padding: 10px 14px; border-top: 1px solid var(--border);
   font-size: 12px;
 }
+.dir-profile { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.dir-profile[hidden] { display: none; }
+/* the selected-path label yields space (and wraps) so the profile picker and
+   the action button always stay on screen, even with a long path */
+#dir-current { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+#dir-select { flex: 0 0 auto; }
 #cwd-input { cursor: pointer; }
 #cwd-input:hover { border-color: var(--accent-dim); }
 
