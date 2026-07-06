@@ -190,6 +190,32 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 .sess-new:hover { color: var(--accent); border-color: var(--accent-dim); }
 
+/* named tab: personal label on top, folder/context muted below */
+.sess-named { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; gap: 1px; }
+.sess-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.sess-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
+.sess-rename { width: 130px; padding: 1px 4px; min-height: 0; font-size: 12px; border-radius: 4px; }
+
+/* drag to reorder (manual order only) */
+.sess-tab.draggable { cursor: grab; }
+.sess-tab.dragging { opacity: .45; cursor: grabbing; }
+.sess-tab.drop-before { box-shadow: inset 3px 0 0 var(--accent); }
+.sess-tab.drop-after { box-shadow: inset -3px 0 0 var(--accent); }
+
+/* right-click tab menu (rename / move / close) */
+.tab-menu {
+  position: fixed; z-index: 50; min-width: 150px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 4px; display: flex; flex-direction: column;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+}
+.tab-menu .menu-item {
+  background: none; border: none; text-align: left;
+  padding: 6px 10px; border-radius: 6px; color: var(--text); font-size: 12px; min-height: 0;
+}
+.tab-menu .menu-item:hover:not(:disabled) { background: var(--bg3); }
+.tab-menu .menu-item:disabled { opacity: .4; cursor: default; }
+
 #divider {
   width: 5px; cursor: col-resize; flex: 0 0 auto;
   background: var(--border);

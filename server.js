@@ -551,7 +551,8 @@ setInterval(checkForUpdates, 6 * 3600 * 1000);  // then every 6 hours
 // PTY sessions — multiple concurrent claude processes, one per tab in the UI
 // ---------------------------------------------------------------------------
 const SCROLLBACK_MAX = 400_000;
-const sessions = new Map(); // sid -> { pty, cwd, args, scrollback, status, pid, createdAt }
+const sessions = new Map(); // sid -> { pty, cwd, args, scrollback, status, pid, createdAt, label }
+let sessionOrder = [];       // sids in the user's chosen tab order (drag / keyboard reorder)
 let sidCounter = 0;
 const termClients = new Set();
 
@@ -567,9 +568,9 @@ let pendingRestore = []; // [{ cwd, profile, args }] from the previous run, offe
 
 function saveSessionSnapshot() {
   try {
-    const live = [...sessions.values()]
-      .filter(s => s.status !== 'exited')
-      .map(s => ({ cwd: s.cwd, profile: s.profile, args: s.args }));
+    const live = orderedSids().map(sid => sessions.get(sid))
+      .filter(s => s && s.status !== 'exited')
+      .map(s => ({ cwd: s.cwd, profile: s.profile, args: s.args, label: s.label || null }));
     fs.writeFileSync(SESSION_SNAPSHOT_FILE, JSON.stringify({ savedAt: Date.now(), sessions: live }));
   } catch {}
 }
@@ -609,8 +610,14 @@ function broadcastEvent(msg) {
   for (const ws of eventClients) if (ws.readyState === 1) ws.send(s);
 }
 
-const sessionInfo = (sid, s) => ({ sid, pid: s.pid, cwd: s.cwd, args: s.args, status: s.status, activity: s.activity || 'working', createdAt: s.createdAt, profile: s.profile, cols: s.pty?.cols, rows: s.pty?.rows });
-const sessionList = () => [...sessions.entries()].map(([sid, s]) => sessionInfo(sid, s));
+// live sids in the user's chosen order; any not yet placed fall to the end
+const orderedSids = () => {
+  const known = sessionOrder.filter(sid => sessions.has(sid));
+  const extra = [...sessions.keys()].filter(sid => !known.includes(sid));
+  return [...known, ...extra];
+};
+const sessionInfo = (sid, s) => ({ sid, pid: s.pid, cwd: s.cwd, args: s.args, status: s.status, activity: s.activity || 'working', createdAt: s.createdAt, profile: s.profile, cols: s.pty?.cols, rows: s.pty?.rows, label: s.label ?? null, order: orderedSids().indexOf(sid) });
+const sessionList = () => orderedSids().map(sid => sessionInfo(sid, sessions.get(sid)));
 
 // ---------------------------------------------------------------------------
 // Activity detection: is the agent working, or waiting on the human?
@@ -644,7 +651,7 @@ setInterval(() => {
   }
 }, 1000);
 
-function startSession({ cwd: dir, args = [], cols = 120, rows = 32, profile: profileId } = {}) {
+function startSession({ cwd: dir, args = [], cols = 120, rows = 32, profile: profileId, label } = {}) {
   const resolved = path.resolve(String(dir || cwd).replace(/^~(?=\/|$)/, HOME));
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
     throw new Error('not a directory: ' + resolved);
@@ -662,8 +669,9 @@ function startSession({ cwd: dir, args = [], cols = 120, rows = 32, profile: pro
     cwd: resolved,
     env,
   });
-  const sess = { pty: proc, cwd: resolved, args, scrollback: '', status: 'running', pid: proc.pid, createdAt: Date.now(), profile: prof.id };
+  const sess = { pty: proc, cwd: resolved, args, scrollback: '', status: 'running', pid: proc.pid, createdAt: Date.now(), profile: prof.id, label: (typeof label === 'string' && label.trim()) ? label.trim().slice(0, 60) : null };
   sessions.set(sid, sess);
+  sessionOrder.push(sid);
   saveSessionSnapshot();
   proc.onData(d => {
     sess.scrollback = (sess.scrollback + d).slice(-SCROLLBACK_MAX);
@@ -688,7 +696,7 @@ function killSession(sid, remove = false) {
     try { s.pty.kill(); } catch {}
     s.status = 'exited';
   }
-  if (remove) sessions.delete(sid);
+  if (remove) { sessions.delete(sid); sessionOrder = sessionOrder.filter(x => x !== sid); }
   saveSessionSnapshot();
 }
 
@@ -1050,7 +1058,7 @@ app.post('/api/sessions/restore', (req, res) => {
   let started = 0;
   for (const item of pendingRestore) {
     if (live.has((item.profile || '') + '\0' + item.cwd)) continue;
-    try { startSession({ cwd: item.cwd, profile: item.profile, args: restoreArgs(item.args) }); started++; }
+    try { startSession({ cwd: item.cwd, profile: item.profile, args: restoreArgs(item.args), label: item.label }); started++; }
     catch {}
   }
   pendingRestore = [];
@@ -1118,6 +1126,23 @@ wssTerm.on('connection', ws => {
       case 'resize':
         if (s?.status === 'running' && msg.cols > 0 && msg.rows > 0) {
           try { s.pty.resize(msg.cols, msg.rows); } catch {}
+        }
+        break;
+      case 'label':
+        // personal name for a tab; '' clears it back to the auto label
+        if (s) {
+          s.label = (typeof msg.label === 'string' && msg.label.trim()) ? msg.label.trim().slice(0, 60) : null;
+          saveSessionSnapshot();
+          broadcastTerm({ type: 'sessions', sessions: sessionList() });
+        }
+        break;
+      case 'reorder':
+        // client sends the full sid order; unknown sids dropped, missing appended
+        if (Array.isArray(msg.order)) {
+          const known = msg.order.filter(sid => sessions.has(sid));
+          sessionOrder = [...known, ...[...sessions.keys()].filter(sid => !known.includes(sid))];
+          saveSessionSnapshot();
+          broadcastTerm({ type: 'sessions', sessions: sessionList() });
         }
         break;
       case 'stop':
