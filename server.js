@@ -609,7 +609,7 @@ function broadcastEvent(msg) {
   for (const ws of eventClients) if (ws.readyState === 1) ws.send(s);
 }
 
-const sessionInfo = (sid, s) => ({ sid, pid: s.pid, cwd: s.cwd, args: s.args, status: s.status, activity: s.activity || 'working', createdAt: s.createdAt, profile: s.profile });
+const sessionInfo = (sid, s) => ({ sid, pid: s.pid, cwd: s.cwd, args: s.args, status: s.status, activity: s.activity || 'working', createdAt: s.createdAt, profile: s.profile, cols: s.pty?.cols, rows: s.pty?.rows });
 const sessionList = () => [...sessions.entries()].map(([sid, s]) => sessionInfo(sid, s));
 
 // ---------------------------------------------------------------------------

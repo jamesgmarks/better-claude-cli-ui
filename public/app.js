@@ -254,6 +254,20 @@ function activateSession(sid) {
     // didn't change dimensions there's no auto-redraw, so the just-shown tab can
     // paint a stale canvas until a manual resize forces it. Force the repaint.
     t.term.refresh(0, t.term.rows - 1);
+    // A reconnected tab may still show stale/garbled scrollback: resizing the
+    // PTY to a size it already has emits no SIGWINCH, so Claude never redraws
+    // (this is why only a manual window "shimmy" fixed it). The first time such
+    // a tab is shown, nudge the PTY by one row and back to guarantee a real
+    // SIGWINCH and a full TUI repaint. Only the PTY is nudged, not xterm, so the
+    // visible grid never reflows.
+    if (t.needsRepaint) {
+      t.needsRepaint = false;
+      const { cols, rows } = t.term;
+      if (cols > 0 && rows > 1) {
+        wsSend({ type: 'resize', sid, cols, rows: rows - 1 });
+        wsSend({ type: 'resize', sid, cols, rows });
+      }
+    }
     t.term.focus();
   });
   renderSessionTabs();
@@ -426,8 +440,20 @@ function connectTerm() {
     switch (m.type) {
       case 'sessions': {
         for (const info of m.sessions) {
-          const { isNew } = ensureTerm(info);
-          if (isNew) wsSend({ type: 'replay', sid: info.sid });
+          const { t, isNew } = ensureTerm(info);
+          if (isNew) {
+            // Match the terminal to the PTY's real size BEFORE replaying, so the
+            // replayed TUI renders at the width Claude produced it at. Hidden
+            // tabs can't self-measure (they'd sit at xterm's default 80 cols and
+            // garble the replay), so we use the server-reported PTY dimensions
+            // rather than racing a fit against the incoming replay data.
+            if (info.cols > 0 && info.rows > 0) t.term.resize(info.cols, info.rows);
+            wsSend({ type: 'replay', sid: info.sid });
+            // Belt-and-suspenders: also force Claude to repaint the first time
+            // this reconnected tab is shown, in case the replay still rendered
+            // at the wrong width (e.g. the server couldn't report PTY dims).
+            t.needsRepaint = true;
+          }
         }
         if (!activeSid && m.sessions.length) activateSession(m.sessions[m.sessions.length - 1].sid);
         renderSessionTabs();
