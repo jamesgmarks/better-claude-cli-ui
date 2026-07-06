@@ -166,6 +166,17 @@ let activeSid = null;
 
 function wsSend(m) { if (termWs?.readyState === 1) termWs.send(JSON.stringify(m)); }
 
+// The one place that measures a terminal and tells its PTY the new size. Every
+// resize trigger — tab activation, the per-terminal and panel ResizeObservers,
+// divider drags, window resize — routes through here. No-ops for a hidden tab
+// (zero-sized), so callers don't each need that guard.
+function refit(sid) {
+  const t = terms.get(sid);
+  if (!t || !t.div.clientWidth || !t.div.clientHeight) return;
+  t.fit.fit();
+  if (t.term.cols > 0) wsSend({ type: 'resize', sid, cols: t.term.cols, rows: t.term.rows });
+}
+
 const shortDir = p => (p || '').split('/').pop() || p || '?';
 
 // VS Code logo (simple-icons path), inlined so the CSP can't block a remote asset
@@ -191,11 +202,7 @@ function ensureTerm(info) {
   // the moment the panel has laid out — fixing the "compressed to 1 column after
   // reload" case that the panel-level ResizeObserver misses (switching tabs
   // doesn't change #terminal's size, so it never refires).
-  t.ro = new ResizeObserver(() => {
-    if (activeSid !== info.sid || !div.clientWidth || !div.clientHeight) return;
-    t.fit.fit();
-    if (term.cols > 0) wsSend({ type: 'resize', sid: info.sid, cols: term.cols, rows: term.rows });
-  });
+  t.ro = new ResizeObserver(() => { if (activeSid === info.sid) refit(info.sid); });
   t.ro.observe(div);
   // Overlay a low-key "open this folder in VS Code" button in the corner.
   // tabindex=-1 so Tab (which goes to the terminal when active) can never land
@@ -248,8 +255,7 @@ function activateSession(sid) {
   activeSid = sid;
   for (const [id, other] of terms) other.div.style.display = id === sid ? '' : 'none';
   requestAnimationFrame(() => {
-    t.fit.fit();
-    wsSend({ type: 'resize', sid, cols: t.term.cols, rows: t.term.rows });
+    refit(sid);
     // A tab that was display:none leaves xterm's renderer dormant; if the fit
     // didn't change dimensions there's no auto-redraw, so the just-shown tab can
     // paint a stale canvas until a manual resize forces it. Force the repaint.
@@ -499,12 +505,8 @@ function connectTerm() {
 }
 connectTerm();
 
-function sendResize() {
-  const t = activeSid && terms.get(activeSid);
-  if (!t) return;
-  t.fit.fit();
-  wsSend({ type: 'resize', sid: activeSid, cols: t.term.cols, rows: t.term.rows });
-}
+// resize the active terminal (panel ResizeObserver, divider drag/keys, window)
+function sendResize() { if (activeSid) refit(activeSid); }
 new ResizeObserver(() => sendResize()).observe($('#terminal'));
 
 function setStatus() {
