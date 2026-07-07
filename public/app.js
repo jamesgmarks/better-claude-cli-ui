@@ -337,6 +337,22 @@ window.addEventListener('keydown', e => {
   moveTab(activeSid, e.key === 'ArrowRight' ? 1 : -1);
 }, true);
 
+// new tab: Cmd/Ctrl+N (capture, to beat xterm). A browser tab reserves
+// Cmd/Ctrl+N for a new window, so like the digit shortcuts we also take the
+// tab-safe modifier (Ctrl on Mac, Alt on Win/Linux); the native one works in
+// a standalone/PWA window.
+window.addEventListener('keydown', e => {
+  if (e.code !== 'KeyN' || e.shiftKey) return;
+  const mod = IS_MAC ? (e.ctrlKey || e.metaKey) : (e.ctrlKey || e.altKey);
+  if (!mod) return;
+  const ae = document.activeElement;
+  const inField = ae && (ae.tagName === 'INPUT'
+    || (ae.tagName === 'TEXTAREA' && !ae.classList.contains('xterm-helper-textarea')));
+  if (inField || !state || $('#dir-modal').open) return;
+  e.preventDefault(); e.stopPropagation();
+  openDirPicker('new-session');
+}, true);
+
 // ---------------------------------------------------------------------------
 // auto-focus (opt-in): waiting tabs sort to the front; when the active
 // session starts working, jump to whichever session is waiting on you
