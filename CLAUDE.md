@@ -46,6 +46,7 @@ The server **binds to `127.0.0.1` only**. All `/api/*` and both WebSockets requi
 ## Working in this repo
 
 - **Run locally:** `npm install` then `npm start` → http://127.0.0.1:3456. `PORT=` and `CLAUDE_UI_CWD=` override port and initial cwd.
+- **Don't restart the better cli server** unless explicitly asked to, or unless you explicitly request permission to do so.
 - **No build, no framework, no test runner, no linter.** Match the existing hand-rolled style: DOM via the `el`/`setChildren` helpers on the frontend; small pure functions on the backend. New deps need a real justification.
 - **Verify before calling a change done:** boot the server and smoke-check the affected endpoints (this is exactly what CI does — see below), e.g. `curl -sf http://127.0.0.1:3456/api/state`. For frontend/UI changes, load the page and exercise the affected flow in the browser; hold to a high bar on the UI (pixel-level polish, keyboard operability, focus states — the README's accessibility section is the standard to maintain).
 - **Two source files do most of the work.** Prefer editing `server.js` / `app.js` over adding new files.
