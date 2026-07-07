@@ -323,6 +323,36 @@ window.addEventListener('keyup', syncTabNumberHint);
 // releasing the key outside the window (blur/alt-tab) would strand the hint on
 window.addEventListener('blur', () => $('#session-tabs')?.classList.remove('show-tab-numbers'));
 
+// move the active tab left/right: Cmd/Ctrl+Shift+Arrow (capture, to beat xterm)
+window.addEventListener('keydown', e => {
+  const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+  if (!mod || !e.shiftKey || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
+  // allow it over the terminal (xterm's hidden helper textarea) but not in real
+  // form fields like rename / extra-args / the path box
+  const ae = document.activeElement;
+  const inField = ae && (ae.tagName === 'INPUT'
+    || (ae.tagName === 'TEXTAREA' && !ae.classList.contains('xterm-helper-textarea')));
+  if (inField || !activeSid) return;
+  e.preventDefault(); e.stopPropagation();
+  moveTab(activeSid, e.key === 'ArrowRight' ? 1 : -1);
+}, true);
+
+// new tab: Cmd/Ctrl+N (capture, to beat xterm). A browser tab reserves
+// Cmd/Ctrl+N for a new window, so like the digit shortcuts we also take the
+// tab-safe modifier (Ctrl on Mac, Alt on Win/Linux); the native one works in
+// a standalone/PWA window.
+window.addEventListener('keydown', e => {
+  if (e.code !== 'KeyN' || e.shiftKey) return;
+  const mod = IS_MAC ? (e.ctrlKey || e.metaKey) : (e.ctrlKey || e.altKey);
+  if (!mod) return;
+  const ae = document.activeElement;
+  const inField = ae && (ae.tagName === 'INPUT'
+    || (ae.tagName === 'TEXTAREA' && !ae.classList.contains('xterm-helper-textarea')));
+  if (inField || !state || $('#dir-modal').open) return;
+  e.preventDefault(); e.stopPropagation();
+  openDirPicker('new-session');
+}, true);
+
 // ---------------------------------------------------------------------------
 // auto-focus (opt-in): waiting tabs sort to the front; when the active
 // session starts working, jump to whichever session is waiting on you
@@ -334,10 +364,12 @@ const ATTENTION_ORDER = { question: 0, ready: 1, working: 2, exited: 3 };
 
 function orderedTerms() {
   const entries = [...terms.entries()];
-  if (!autoFocus) return entries;
-  return entries.sort((a, b) =>
+  // auto-focus overrides manual order: waiting sessions sort to the front
+  if (autoFocus) return entries.sort((a, b) =>
     (ATTENTION_ORDER[activityOf(a[1].info)] ?? 2) - (ATTENTION_ORDER[activityOf(b[1].info)] ?? 2)
     || (a[1].info?.createdAt || 0) - (b[1].info?.createdAt || 0));
+  // otherwise the user's manual tab order (server-persisted) wins
+  return entries.sort((a, b) => (a[1].info?.order ?? 1e9) - (b[1].info?.order ?? 1e9));
 }
 
 // typing echo makes an idle session look "working" — never yank the view
@@ -379,25 +411,56 @@ function activityOf(info) {
 function renderSessionTabs() {
   const bar = $('#session-tabs');
   const order = orderedTerms();
+  const canReorder = !autoFocus && editingSid == null; // drag/keyboard only in manual mode
   const tabs = order.map(([sid, t], i) => {
     const info = t.info || {};
     const act = activityOf(info);
     const ui = ACTIVITY_UI[act] || ACTIVITY_UI.working;
     const flavor = info.args?.includes('--continue') ? '⏩ ' : info.args?.includes('--resume') ? '⟲ ' : '';
+    const context = `${flavor}${shortDir(info.cwd)}`;
     // show which account a tab runs under, but only when more than one exists
     const prof = (state?.profiles?.length > 1) && state.profiles.find(p => p.id === info.profile);
     // number to press with the modifier held (revealed via #session-tabs.show-tab-numbers):
     // mirrors the shortcut — 1-8 by position, and 9 for the last tab beyond that.
     const kbdNum = i < 8 ? i + 1 : (i === order.length - 1 ? 9 : null);
+    // a named tab shows the personal label on top with its folder/context below
+    const labelNode = editingSid === sid
+      ? el('input', {
+          class: 'sess-rename', value: info.label || '', spellcheck: false, 'aria-label': 'Tab name',
+          onkeydown: e => {
+            e.stopPropagation();
+            if (e.key === 'Enter') { e.preventDefault(); commitRename(sid, e.target.value); }
+            else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
+          },
+          onblur: e => commitRename(sid, e.target.value),
+          onpointerdown: e => e.stopPropagation(),
+          onclick: e => e.stopPropagation(),
+        })
+      : info.label
+        ? el('span', { class: 'sess-named' },
+            el('span', { class: 'sess-name' }, info.label),
+            el('span', { class: 'sess-sub' }, context))
+        : el('span', { class: 'sess-label' }, context);
     return el('div', {
-      class: 'sess-tab' + (sid === activeSid ? ' active' : '') + (act === 'exited' ? ' dead' : '') + ' act-' + ui.cls,
-      title: `${ui.hint}\n${info.cwd || ''}${prof ? '\nprofile: ' + prof.label : ''}${info.args?.length ? '\nclaude ' + info.args.join(' ') : ''}`,
+      class: 'sess-tab' + (sid === activeSid ? ' active' : '') + (act === 'exited' ? ' dead' : '')
+        + ' act-' + ui.cls + (canReorder ? ' draggable' : ''),
+      title: `${info.label ? info.label + '\n' : ''}${ui.hint}\n${info.cwd || ''}${prof ? '\nprofile: ' + prof.label : ''}${info.args?.length ? '\nclaude ' + info.args.join(' ') : ''}`,
+      draggable: canReorder ? 'true' : 'false',
+      ondragstart: e => { dragSid = sid; e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', sid); } catch {} e.currentTarget.classList.add('dragging'); },
+      ondragend: e => { dragSid = null; e.currentTarget.classList.remove('dragging'); clearDropMarks(); },
+      ondragover: e => { if (!canReorder || !dragSid || dragSid === sid) return; e.preventDefault(); markDrop(e.currentTarget, e.clientX); },
+      ondragleave: e => { e.currentTarget.classList.remove('drop-before', 'drop-after'); },
+      ondrop: e => { if (!canReorder || !dragSid || dragSid === sid) return; e.preventDefault(); dropReorder(dragSid, sid, isAfter(e.currentTarget, e.clientX)); },
+      oncontextmenu: e => { e.preventDefault(); showTabMenu(sid, e.clientX, e.clientY); },
+      ondblclick: e => { e.preventDefault(); startRename(sid); },
+      onmousedown: e => { if (e.button === 1) e.preventDefault(); }, // no middle-click autoscroll
+      onauxclick: e => { if (e.button === 1) { e.preventDefault(); closeSession(sid); } }, // middle-click closes (with confirm)
       ...press(() => activateSession(sid), `Switch to session in ${shortDir(info.cwd)} (${ui.label})`),
     },
       kbdNum != null ? el('span', { class: 'sess-num', 'aria-hidden': 'true' }, String(kbdNum)) : null,
       el('span', { class: 'sess-dot ' + ui.cls, 'aria-hidden': 'true' }),
       prof ? el('span', { class: 'sess-prof' }, prof.label) : null,
-      el('span', { class: 'sess-label' }, `${flavor}${shortDir(info.cwd)}`),
+      labelNode,
       act === 'question' ? el('span', { class: 'sess-ask' }, '?') : null,
       el('button', {
         class: 'sess-close', 'aria-label': 'Close session in ' + shortDir(info.cwd),
@@ -411,7 +474,84 @@ function renderSessionTabs() {
     title: 'Pick a folder, then start a new Claude session there',
     onclick: () => openDirPicker('new-session'),
   }, '+ New'));
+  if (editingSid != null) { const inp = bar.querySelector('.sess-rename'); if (inp) { inp.focus(); inp.select(); } }
   updateDocTitle();
+}
+
+// ---- tab naming + manual reordering ----------------------------------------
+let editingSid = null; // sid whose tab is being renamed inline
+let dragSid = null;    // sid currently being dragged
+
+const visibleSids = () => orderedTerms().map(([sid]) => sid);
+const isAfter = (tabEl, x) => { const r = tabEl.getBoundingClientRect(); return x > r.left + r.width / 2; };
+const clearDropMarks = () => $('#session-tabs')?.querySelectorAll('.drop-before,.drop-after').forEach(n => n.classList.remove('drop-before', 'drop-after'));
+function markDrop(tabEl, x) { clearDropMarks(); tabEl.classList.toggle('drop-after', isAfter(tabEl, x)); tabEl.classList.toggle('drop-before', !isAfter(tabEl, x)); }
+
+// persist a new order (optimistically reflect it locally; server echoes it back)
+function applyOrder(sids) {
+  sids.forEach((s, i) => { const t = terms.get(s); if (t?.info) t.info.order = i; });
+  wsSend({ type: 'reorder', order: sids });
+  renderSessionTabs();
+}
+function dropReorder(from, to, after) {
+  const sids = visibleSids().filter(s => s !== from);
+  let idx = sids.indexOf(to);
+  idx = idx < 0 ? sids.length : after ? idx + 1 : idx;
+  sids.splice(idx, 0, from);
+  applyOrder(sids);
+}
+function moveTab(sid, delta) {
+  if (autoFocus) { toast('Turn off 🎯 auto-focus to arrange tabs by hand'); return; }
+  const sids = visibleSids();
+  const i = sids.indexOf(sid), j = i + delta;
+  if (i < 0 || j < 0 || j >= sids.length) return;
+  sids.splice(j, 0, sids.splice(i, 1)[0]);
+  applyOrder(sids);
+}
+
+function startRename(sid) { if (terms.has(sid)) { editingSid = sid; renderSessionTabs(); } }
+function cancelRename() { editingSid = null; renderSessionTabs(); }
+function commitRename(sid, val) {
+  if (editingSid !== sid) return; // Enter already committed; ignore the trailing blur
+  editingSid = null;
+  const label = (val || '').trim();
+  const t = terms.get(sid); if (t?.info) t.info.label = label || null; // optimistic
+  wsSend({ type: 'label', sid, label });
+  renderSessionTabs();
+}
+
+// right-click tab menu: rename / move / close
+let tabMenu = null;
+function closeTabMenu() {
+  if (!tabMenu) return;
+  tabMenu.remove(); tabMenu = null;
+  document.removeEventListener('pointerdown', onMenuAway, true);
+  document.removeEventListener('keydown', onMenuKey, true);
+}
+function onMenuAway(e) { if (tabMenu && !tabMenu.contains(e.target)) closeTabMenu(); }
+function onMenuKey(e) { if (e.key === 'Escape') { e.preventDefault(); closeTabMenu(); } }
+function showTabMenu(sid, x, y) {
+  closeTabMenu();
+  const sids = visibleSids();
+  const i = sids.indexOf(sid);
+  const exited = terms.get(sid)?.info?.status === 'exited';
+  const item = (text, fn, disabled) => el('button', {
+    class: 'menu-item', role: 'menuitem', ...(disabled ? { disabled: 'disabled' } : {}),
+    onclick: () => { closeTabMenu(); if (!disabled) fn(); },
+  }, text);
+  tabMenu = el('div', { class: 'tab-menu', role: 'menu' },
+    item('Rename…', () => startRename(sid)),
+    item('Move left', () => moveTab(sid, -1), autoFocus || i <= 0),
+    item('Move right', () => moveTab(sid, +1), autoFocus || i < 0 || i >= sids.length - 1),
+    item(exited ? 'Remove tab' : 'Close', () => closeSession(sid)),
+  );
+  document.body.append(tabMenu);
+  tabMenu.style.left = Math.max(6, Math.min(x, innerWidth - tabMenu.offsetWidth - 6)) + 'px';
+  tabMenu.style.top = Math.max(6, Math.min(y, innerHeight - tabMenu.offsetHeight - 6)) + 'px';
+  setTimeout(() => {
+    document.addEventListener('pointerdown', onMenuAway, true);
+    document.addEventListener('keydown', onMenuKey, true);
+  }, 0);
 }
 
 // browser tab shows what needs you, even when the Deck isn't focused
