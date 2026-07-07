@@ -36,6 +36,14 @@ const TOKEN_FILE = path.join(APP_DIR, '.deck-token');
 const log = m => console.log(m);
 const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: 'inherit', ...opts });
 const tryRun = (cmd, args, opts = {}) => spawnSync(cmd, args, { stdio: 'pipe', encoding: 'utf8', ...opts });
+// npm is a .cmd batch file on Windows, which spawnSync refuses to run without
+// a shell (EINVAL, CVE-2024-27980) — and args here are fixed flags, so no
+// shell-quoting risk. Surface spawn failures: they'd otherwise read as "ran".
+const npmRun = (args, opts = {}) => {
+  const r = tryRun('npm', args, { stdio: 'inherit', shell: PLATFORM === 'win32', ...opts });
+  if (r.error) log(`  npm did not run: ${r.error.message}`);
+  return r;
+};
 
 // ---------------------------------------------------------------------------
 // shared steps
@@ -46,18 +54,18 @@ function ptyLoads(dir) {
 
 function npmInstall(dir) {
   log('  installing dependencies (node-pty compiles natively — may take a minute)…');
-  tryRun('npm', ['install', '--omit=dev', '--no-fund', '--no-audit'], { cwd: dir, stdio: 'inherit' });
+  npmRun(['install', '--omit=dev', '--no-fund', '--no-audit'], { cwd: dir });
   if (ptyLoads(dir)) return;
   // node-pty is an optionalDependency so npm won't hard-fail; build it
   // explicitly, then retry with the bundled shim for old-GCC Linux systems
   log('  node-pty is not built yet — building it directly…');
-  tryRun('npm', ['install', 'node-pty', '--no-save', '--no-fund', '--no-audit'], { cwd: dir, stdio: 'inherit' });
+  npmRun(['install', 'node-pty', '--no-save', '--no-fund', '--no-audit'], { cwd: dir });
   if (ptyLoads(dir)) return;
   const shim = path.join(dir, 'tools', 'g++20-shim');
   if (PLATFORM !== 'win32' && fs.existsSync(shim)) {
     log('  plain build failed — retrying with the bundled g++20 shim (old-GCC systems)…');
-    tryRun('npm', ['install', 'node-pty', '--no-save', '--no-fund', '--no-audit'],
-      { cwd: dir, stdio: 'inherit', env: { ...process.env, CXX: shim } });
+    npmRun(['install', 'node-pty', '--no-save', '--no-fund', '--no-audit'],
+      { cwd: dir, env: { ...process.env, CXX: shim } });
   }
   if (!ptyLoads(dir)) throw new Error('node-pty failed to build — install a C++20-capable compiler toolchain and rerun');
 }

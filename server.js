@@ -536,8 +536,9 @@ async function applyUpdate() {
   await new Promise(resolve => {
     const shim = path.join(__dirname, 'tools', 'g++20-shim');
     const env = fs.existsSync(shim) ? { ...process.env, CXX: shim } : process.env;
+    // npm is a .cmd on Windows — needs a shell to spawn (EINVAL otherwise)
     execFile('npm', ['install', '--omit=dev', '--no-fund', '--no-audit'],
-      { cwd: __dirname, timeout: 300_000, env }, () => resolve());
+      { cwd: __dirname, timeout: 300_000, env, shell: process.platform === 'win32' }, () => resolve());
   });
   console.log('update applied — exiting so the service manager restarts on the new code');
   setTimeout(() => process.exit(0), 400); // under systemd Restart=always this is a relaunch
