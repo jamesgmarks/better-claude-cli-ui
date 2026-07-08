@@ -395,6 +395,24 @@ async function extractBuiltinCommands() {
 }
 extractBuiltinCommands();
 
+// Projects previously opened in ANY profile — the union of every profile's
+// .claude.json project keys, dead paths dropped, most recently used first.
+// Recency is the mtime of the profile's projects/<munged-path>/ transcript
+// dir (touched whenever a session writes there); never-used entries sort last.
+function recentProjects() {
+  const out = [];
+  for (const prof of profiles) {
+    const cj = readJsonFile(prof.claudeJson).json || {};
+    for (const dir of Object.keys(cj.projects || {})) {
+      if (!fs.existsSync(dir)) continue;
+      let lastUsed = 0;
+      try { lastUsed = fs.statSync(path.join(prof.configDir, 'projects', dir.replace(/[^a-zA-Z0-9]/g, '-'))).mtimeMs; } catch {}
+      out.push({ path: dir, profile: prof.id, lastUsed });
+    }
+  }
+  return out.sort((a, b) => b.lastUsed - a.lastUsed);
+}
+
 function getState() {
   const p = paths();
   const claudeJson = readJsonFile(p.claudeJson);
@@ -434,6 +452,7 @@ function getState() {
       lastSessionId: projectEntry.lastSessionId || null,
     } : null,
     knownProjects: Object.keys(cj.projects || {}),
+    recentProjects: recentProjects(),
     memory: {
       user: { path: p.userMemory, ...readTextFile(p.userMemory) },
       project: { path: p.projectMemory, ...readTextFile(p.projectMemory) },
