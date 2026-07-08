@@ -446,7 +446,7 @@ function renderSessionTabs() {
     return el('div', {
       class: 'sess-tab' + (sid === activeSid ? ' active' : '') + (act === 'exited' ? ' dead' : '')
         + ' act-' + ui.cls + (canReorder ? ' draggable' : ''),
-      title: `${info.label ? info.label + '\n' : ''}${ui.hint}${info.sandbox ? '\n🛡 sandboxed — claude runs jailed in a devcontainer' : ''}\n${info.cwd || ''}${prof ? '\nprofile: ' + prof.label : ''}${info.args?.length ? '\nclaude ' + info.args.join(' ') : ''}`,
+      title: `${info.label ? info.label + '\n' : ''}${ui.hint}${info.sandbox ? '\n🛡 sandboxed — claude runs jailed in a devcontainer' : ''}${info.args?.includes('--dangerously-skip-permissions') ? '\n☢️ permission prompts bypassed (--dangerously-skip-permissions)' : ''}\n${info.cwd || ''}${prof ? '\nprofile: ' + prof.label : ''}${info.args?.length ? '\nclaude ' + info.args.join(' ') : ''}`,
       draggable: canReorder ? 'true' : 'false',
       ondragstart: e => { dragSid = sid; e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', sid); } catch {} e.currentTarget.classList.add('dragging'); },
       ondragend: e => { dragSid = null; e.currentTarget.classList.remove('dragging'); clearDropMarks(); },
@@ -462,6 +462,8 @@ function renderSessionTabs() {
       kbdNum != null ? el('span', { class: 'sess-num', 'aria-hidden': 'true' }, String(kbdNum)) : null,
       el('span', { class: 'sess-dot ' + ui.cls, 'aria-hidden': 'true' }),
       info.sandbox ? el('span', { class: 'sess-shield', 'aria-label': 'sandboxed session' }, '🛡') : null,
+      info.args?.includes('--dangerously-skip-permissions')
+        ? el('span', { class: 'sess-shield', 'aria-label': 'permission prompts bypassed' }, '☢️') : null,
       prof ? el('span', { class: 'sess-prof' }, prof.label) : null,
       labelNode,
       act === 'question' ? el('span', { class: 'sess-ask' }, '?') : null,
