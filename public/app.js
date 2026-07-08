@@ -932,12 +932,6 @@ function openDirPicker(mode = 'cwd', startArgs = []) {
       el('option', { value: p.id }, p.isDefault && p.label !== 'default' ? `${p.label} · default` : p.label)));
     profSel.value = state.activeProfileId;
   }
-  const shortcuts = [
-    { label: '🏠 home', path: state.home },
-    ...(state.knownProjects || []).map(p => ({ label: '📁 ' + (p.split('/').pop() || p), path: p })),
-  ];
-  setChildren($('#dir-shortcuts'), shortcuts.map(s =>
-    el('button', { class: 'chip', title: s.path, onclick: () => browseTo(s.path) }, s.label)));
   $('#dir-modal').showModal();
   browseTo(state.cwd);
 }

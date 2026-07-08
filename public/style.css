@@ -429,9 +429,8 @@ dialog#dir-modal {
   padding: 0; display: none; flex-direction: column;
 }
 dialog#dir-modal[open] { display: flex; }
-.dir-path-row { display: flex; gap: 8px; align-items: center; padding: 10px 14px 4px; }
+.dir-path-row { display: flex; gap: 8px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .dir-path-row input#dir-path { flex: 1; }
-#dir-shortcuts { padding: 6px 14px; border-bottom: 1px solid var(--border); }
 #dir-list { flex: 1; overflow-y: auto; padding: 6px 8px; }
 .dir-item {
   display: flex; align-items: center; gap: 8px;
