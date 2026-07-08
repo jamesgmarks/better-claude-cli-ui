@@ -48,6 +48,10 @@ const C_CONFIG_HOST = '/deck/claude-config-host';
 // host config-dir entries that get their own RW bind (session persistence —
 // written constantly by the CLI, never executed by the host)
 const RW_DIRS = ['projects', 'todos', 'shell-snapshots', 'file-history', 'statsig'];
+// entries claude must be able to WRITE but that must never flow back to the
+// host (their contents influence future host sessions): container-local dirs,
+// not symlinks into the RO mount and not binds
+const LOCAL_DIRS = ['session-env'];
 
 // printed when the container is up and claude is about to take over the TTY;
 // server.js watches session output for it to end the tab's "booting" state
@@ -234,9 +238,14 @@ function runDevcontainer(args) {
 const SEED_SCRIPT = `set -e
 mkdir -p ${C_CONFIG}
 find ${C_CONFIG} -maxdepth 1 -type l | while IFS= read -r l; do [ -e "$l" ] || rm -f "$l"; done
+for name in ${LOCAL_DIRS.join(' ')}; do
+  t="${C_CONFIG}/$name"
+  if [ -L "$t" ]; then rm -f "$t"; fi  # reused container seeded before these went local
+  mkdir -p "$t"
+done
 find ${C_CONFIG_HOST} -mindepth 1 -maxdepth 1 | while IFS= read -r src; do
   name=$(basename "$src")
-  case " ${RW_DIRS.join(' ')} .claude.json .credentials.json " in *" $name "*) continue ;; esac
+  case " ${RW_DIRS.join(' ')} ${LOCAL_DIRS.join(' ')} .claude.json .credentials.json " in *" $name "*) continue ;; esac
   t="${C_CONFIG}/$name"
   if [ -e "$t" ] && [ ! -L "$t" ]; then continue; fi
   ln -sfn "$src" "$t"
