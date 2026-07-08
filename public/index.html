@@ -90,7 +90,6 @@
       <button id="dir-go" class="tiny">Go</button>
       <label class="flag"><input type="checkbox" id="dir-hidden"> hidden</label>
     </div>
-    <div id="dir-shortcuts" class="chips"></div>
     <div id="dir-list"></div>
     <div class="modal-foot">
       <span id="dir-current" class="muted"></span>
@@ -99,6 +98,18 @@
         <select id="dir-profile-select" aria-label="Profile for this session" title="Which Claude config/account this session runs under"></select>
       </span>
       <button id="dir-select" class="primary">Use this folder</button>
+    </div>
+  </dialog>
+
+  <dialog id="palette" aria-label="Quick switcher">
+    <input id="palette-input" type="text" placeholder="Switch to a tab or open a project…"
+           spellcheck="false" autocomplete="off" aria-label="Search open tabs and projects">
+    <div id="palette-list" role="listbox" aria-label="Results"></div>
+    <div class="palette-hints">
+      <span><kbd>↑↓</kbd> navigate</span>
+      <span><kbd>↵</kbd> switch / open</span>
+      <span id="palette-hint-continue"><kbd>⇧↵</kbd> open with ⏩ --continue</span>
+      <span><kbd>esc</kbd> close</span>
     </div>
   </dialog>
 

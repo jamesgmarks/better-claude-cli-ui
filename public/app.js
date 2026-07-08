@@ -274,7 +274,9 @@ function activateSession(sid) {
         wsSend({ type: 'resize', sid, cols, rows });
       }
     }
-    t.term.focus();
+    // don't steal focus from an inline tab-rename in progress (blur would
+    // commit it out from under the user)
+    if (editingSid == null) t.term.focus();
   });
   renderSessionTabs();
   setStatus();
@@ -429,7 +431,7 @@ function renderSessionTabs() {
           class: 'sess-rename', value: info.label || '', spellcheck: false, 'aria-label': 'Tab name',
           onkeydown: e => {
             e.stopPropagation();
-            if (e.key === 'Enter') { e.preventDefault(); commitRename(sid, e.target.value); }
+            if (e.key === 'Enter') { e.preventDefault(); commitRename(sid, e.target.value, true); }
             else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
           },
           onblur: e => commitRename(sid, e.target.value),
@@ -510,15 +512,20 @@ function moveTab(sid, delta) {
 }
 
 function startRename(sid) { if (terms.has(sid)) { editingSid = sid; renderSessionTabs(); } }
-function cancelRename() { editingSid = null; renderSessionTabs(); }
-function commitRename(sid, val) {
+// finishing the rename with the keyboard (Enter/Escape) hands focus to the
+// terminal so you can type right away; a click-away blur leaves focus where
+// the user clicked
+function cancelRename() { editingSid = null; renderSessionTabs(); focusActiveTerm(); }
+function commitRename(sid, val, refocus = false) {
   if (editingSid !== sid) return; // Enter already committed; ignore the trailing blur
   editingSid = null;
   const label = (val || '').trim();
   const t = terms.get(sid); if (t?.info) t.info.label = label || null; // optimistic
   wsSend({ type: 'label', sid, label });
   renderSessionTabs();
+  if (refocus) focusActiveTerm();
 }
+function focusActiveTerm() { if (activeSid) terms.get(activeSid)?.term.focus(); }
 
 // right-click tab menu: rename / move / close
 let tabMenu = null;
@@ -609,6 +616,12 @@ function connectTerm() {
       case 'session-started':
         ensureTerm(m.session);
         activateSession(m.session.sid);
+        // a tab THIS client just opened prompts for a label right away —
+        // unless one is pre-assigned (e.g. a restored session keeps its name)
+        if (promptLabelOnStart) {
+          promptLabelOnStart = false;
+          if (!m.session.label) startRename(m.session.sid);
+        }
         break;
       case 'data':
         terms.get(m.sid)?.term.write(m.data);
@@ -668,8 +681,12 @@ $('#flag-autofocus').onchange = e => {
   toast(autoFocus ? '🎯 Auto-focus on — sessions waiting on you come to the front' : 'Auto-focus off');
 };
 
-// start a NEW session tab; never touches the ones already running
+// start a NEW session tab; never touches the ones already running.
+// session-started is broadcast to every client, so this flag marks the one
+// start WE initiated as the tab to prompt a label for.
+let promptLabelOnStart = false;
 function startClaude(extra = [], cwdOverride = null, profileOverride = null) {
+  promptLabelOnStart = true;
   const args = [...extra];
   if ($('#flag-skip').checked) args.push('--dangerously-skip-permissions');
   const typed = $('#extra-args').value.trim();
@@ -932,12 +949,6 @@ function openDirPicker(mode = 'cwd', startArgs = []) {
       el('option', { value: p.id }, p.isDefault && p.label !== 'default' ? `${p.label} · default` : p.label)));
     profSel.value = state.activeProfileId;
   }
-  const shortcuts = [
-    { label: '🏠 home', path: state.home },
-    ...(state.knownProjects || []).map(p => ({ label: '📁 ' + (p.split('/').pop() || p), path: p })),
-  ];
-  setChildren($('#dir-shortcuts'), shortcuts.map(s =>
-    el('button', { class: 'chip', title: s.path, onclick: () => browseTo(s.path) }, s.label)));
   $('#dir-modal').showModal();
   browseTo(state.cwd);
 }
@@ -969,6 +980,127 @@ $('#dir-select').onclick = e => busy(e.currentTarget, async () => {
     refreshState();
   } catch (err) { toast(err.message, true); }
 });
+
+// ---------------------------------------------------------------------------
+// Quick switcher (Cmd/Ctrl+K) — type part of a tab label, project name, or
+// path: pick an open tab to switch to it, or a known project (from any
+// profile) to open a new tab there. Shift+Enter opens with --continue.
+// ---------------------------------------------------------------------------
+let paletteItems = [];
+let paletteSel = 0;
+
+// 0 = name starts with query, 1 = name contains, 2 = only the path contains;
+// Infinity = no match. Lower wins; ties keep the source order (tab order for
+// tabs, recency for projects).
+function paletteRank(q, names, paths) {
+  if (!q) return 0;
+  let best = Infinity;
+  for (const n of names) {
+    const s = (n || '').toLowerCase();
+    if (!s || !s.includes(q)) continue;
+    best = Math.min(best, s.startsWith(q) ? 0 : 1);
+  }
+  for (const p of paths) if ((p || '').toLowerCase().includes(q)) best = Math.min(best, 2);
+  return best;
+}
+
+function paletteResults(q) {
+  const tabs = orderedTerms()
+    .map(([sid, t]) => ({ kind: 'tab', sid, info: t.info || {} }))
+    .map(it => ({ ...it, rank: paletteRank(q, [it.info.label, shortDir(it.info.cwd)], [it.info.cwd]) }));
+  const projects = (state?.recentProjects || [])
+    .map(p => ({ kind: 'project', ...p, rank: paletteRank(q, [shortDir(p.path)], [p.path]) }));
+  const byRank = (a, b) => a.rank - b.rank; // stable sort: source order within a rank
+  return [...tabs.filter(t => t.rank < Infinity).sort(byRank),
+          ...projects.filter(p => p.rank < Infinity).sort(byRank)];
+}
+
+function paletteSetSel(i) {
+  paletteSel = i;
+  const rows = $('#palette-list').querySelectorAll('.palette-item');
+  rows.forEach((r, j) => r.classList.toggle('sel', j === i));
+  rows[i]?.scrollIntoView({ block: 'nearest' });
+}
+
+function renderPalette() {
+  const profOf = id => (state?.profiles?.length > 1) && state.profiles.find(p => p.id === id);
+  const rows = [];
+  let lastKind = null;
+  paletteItems.forEach((it, i) => {
+    if (it.kind !== lastKind) {
+      rows.push(el('div', { class: 'palette-section' }, it.kind === 'tab' ? 'Open tabs' : 'Projects'));
+      lastKind = it.kind;
+    }
+    const prof = profOf(it.kind === 'tab' ? it.info.profile : it.profile);
+    const home = state?.home || '';
+    const body = it.kind === 'tab'
+      ? [el('span', { class: 'sess-dot ' + (ACTIVITY_UI[activityOf(it.info)] || ACTIVITY_UI.working).cls }),
+         el('span', { class: 'palette-name' }, it.info.label || shortDir(it.info.cwd)),
+         el('span', { class: 'palette-path' }, (it.info.cwd || '').replace(home, '~'))]
+      : [el('span', {}, '📁'),
+         el('span', { class: 'palette-name' }, shortDir(it.path)),
+         el('span', { class: 'palette-path' }, it.path.replace(home, '~'))];
+    rows.push(el('div', {
+      class: 'palette-item' + (i === paletteSel ? ' sel' : ''),
+      onclick: () => paletteGo(it, false),
+      onmouseenter: () => paletteSetSel(i),
+    }, ...body, prof ? el('span', { class: 'sess-prof' }, prof.label) : null));
+  });
+  if (!paletteItems.length) rows.push(el('div', { class: 'empty' }, 'No matching tabs or projects'));
+  setChildren($('#palette-list'), rows);
+}
+
+function paletteGo(it, withContinue) {
+  $('#palette').close();
+  if (!it) return;
+  if (it.kind === 'tab') { activateSession(it.sid); return; }
+  startClaude(withContinue ? ['--continue'] : [], it.path, it.profile);
+  const prof = (state?.profiles?.length > 1) && state.profiles.find(p => p.id === it.profile);
+  toast((withContinue ? '⏩ Continuing in ' : 'New session in ') + it.path.replace(state?.home || '', '~')
+    + (prof ? ` · ${prof.label}` : ''));
+}
+
+function openPalette() {
+  $('#palette-input').value = '';
+  paletteItems = paletteResults('');
+  paletteSel = 0;
+  renderPalette();
+  $('#palette').showModal();
+}
+
+$('#palette-input').addEventListener('input', e => {
+  paletteItems = paletteResults(e.target.value.trim().toLowerCase());
+  paletteSel = 0;
+  renderPalette();
+});
+$('#palette-input').addEventListener('keydown', e => {
+  const n = paletteItems.length;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (n) paletteSetSel((paletteSel + (e.key === 'ArrowDown' ? 1 : -1) + n) % n);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    paletteGo(paletteItems[paletteSel], e.shiftKey);
+  }
+});
+// light up the ⇧↵ hint while Shift is held, as a reminder it means --continue
+for (const evt of ['keydown', 'keyup']) $('#palette').addEventListener(evt, e =>
+  $('#palette-hint-continue').classList.toggle('lit', e.shiftKey));
+$('#palette').addEventListener('click', e => { if (e.target === e.currentTarget) $('#palette').close(); });
+
+// same modifier convention as the digit/N shortcuts: native Cmd/Ctrl works in
+// a standalone/PWA window, and the tab-safe modifier works in a browser tab
+window.addEventListener('keydown', e => {
+  if (e.code !== 'KeyK' || e.shiftKey) return;
+  const mod = IS_MAC ? (e.ctrlKey || e.metaKey) : (e.ctrlKey || e.altKey);
+  if (!mod) return;
+  const ae = document.activeElement;
+  const inField = ae && (ae.tagName === 'INPUT'
+    || (ae.tagName === 'TEXTAREA' && !ae.classList.contains('xterm-helper-textarea')));
+  if ((inField && ae.id !== 'palette-input') || !state || $('#dir-modal').open) return;
+  e.preventDefault(); e.stopPropagation();
+  $('#palette').open ? $('#palette').close() : openPalette();
+}, true);
 
 // --- card infrastructure (open/closed persisted) ---
 const openCards = new Set(JSON.parse(localStorage.getItem('openCards') || '["quick","core","permissions","mcp"]'));
