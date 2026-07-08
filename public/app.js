@@ -274,7 +274,9 @@ function activateSession(sid) {
         wsSend({ type: 'resize', sid, cols, rows });
       }
     }
-    t.term.focus();
+    // don't steal focus from an inline tab-rename in progress (blur would
+    // commit it out from under the user)
+    if (editingSid == null) t.term.focus();
   });
   renderSessionTabs();
   setStatus();
@@ -429,7 +431,7 @@ function renderSessionTabs() {
           class: 'sess-rename', value: info.label || '', spellcheck: false, 'aria-label': 'Tab name',
           onkeydown: e => {
             e.stopPropagation();
-            if (e.key === 'Enter') { e.preventDefault(); commitRename(sid, e.target.value); }
+            if (e.key === 'Enter') { e.preventDefault(); commitRename(sid, e.target.value, true); }
             else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
           },
           onblur: e => commitRename(sid, e.target.value),
@@ -510,15 +512,20 @@ function moveTab(sid, delta) {
 }
 
 function startRename(sid) { if (terms.has(sid)) { editingSid = sid; renderSessionTabs(); } }
-function cancelRename() { editingSid = null; renderSessionTabs(); }
-function commitRename(sid, val) {
+// finishing the rename with the keyboard (Enter/Escape) hands focus to the
+// terminal so you can type right away; a click-away blur leaves focus where
+// the user clicked
+function cancelRename() { editingSid = null; renderSessionTabs(); focusActiveTerm(); }
+function commitRename(sid, val, refocus = false) {
   if (editingSid !== sid) return; // Enter already committed; ignore the trailing blur
   editingSid = null;
   const label = (val || '').trim();
   const t = terms.get(sid); if (t?.info) t.info.label = label || null; // optimistic
   wsSend({ type: 'label', sid, label });
   renderSessionTabs();
+  if (refocus) focusActiveTerm();
 }
+function focusActiveTerm() { if (activeSid) terms.get(activeSid)?.term.focus(); }
 
 // right-click tab menu: rename / move / close
 let tabMenu = null;
@@ -609,6 +616,12 @@ function connectTerm() {
       case 'session-started':
         ensureTerm(m.session);
         activateSession(m.session.sid);
+        // a tab THIS client just opened prompts for a label right away —
+        // unless one is pre-assigned (e.g. a restored session keeps its name)
+        if (promptLabelOnStart) {
+          promptLabelOnStart = false;
+          if (!m.session.label) startRename(m.session.sid);
+        }
         break;
       case 'data':
         terms.get(m.sid)?.term.write(m.data);
@@ -668,8 +681,12 @@ $('#flag-autofocus').onchange = e => {
   toast(autoFocus ? '🎯 Auto-focus on — sessions waiting on you come to the front' : 'Auto-focus off');
 };
 
-// start a NEW session tab; never touches the ones already running
+// start a NEW session tab; never touches the ones already running.
+// session-started is broadcast to every client, so this flag marks the one
+// start WE initiated as the tab to prompt a label for.
+let promptLabelOnStart = false;
 function startClaude(extra = [], cwdOverride = null, profileOverride = null) {
+  promptLabelOnStart = true;
   const args = [...extra];
   if ($('#flag-skip').checked) args.push('--dangerously-skip-permissions');
   const typed = $('#extra-args').value.trim();
