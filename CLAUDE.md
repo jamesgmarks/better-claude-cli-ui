@@ -46,9 +46,9 @@ The server **binds to `127.0.0.1` only**. All `/api/*` and both WebSockets requi
 ## Working in this repo
 
 - **Run locally:** `npm install` then `npm start` → http://127.0.0.1:3456. `PORT=` and `CLAUDE_UI_CWD=` override port and initial cwd.
-- **Don't restart the better cli server** unless explicitly asked to, or unless you explicitly request permission to do so.
+- **NEVER restart or start the server yourself — DANGEROUS.** A server (re)started by an AI agent runs as a child of that agent's process, so the Claude CLI treats every session spawned in it as a child agent, invisibly to the user. Those sessions are **not persisted to disk**, which silently breaks `--continue` / `--resume` — and session data is extremely valuable to the user. If a restart is needed (e.g. to pick up a `server.js` change), ask the user to stop and start the server themselves, and wait.
 - **No build, no framework, no test runner, no linter.** Match the existing hand-rolled style: DOM via the `el`/`setChildren` helpers on the frontend; small pure functions on the backend. New deps need a real justification.
-- **Verify before calling a change done:** boot the server and smoke-check the affected endpoints (this is exactly what CI does — see below), e.g. `curl -sf http://127.0.0.1:3456/api/state`. For frontend/UI changes, load the page and exercise the affected flow in the browser; hold to a high bar on the UI (pixel-level polish, keyboard operability, focus states — the README's accessibility section is the standard to maintain).
+- **Verify before calling a change done:** smoke-check the affected endpoints against the already-running server (this is exactly what CI does on its own throwaway instance — see below), e.g. `curl -sf http://127.0.0.1:3456/api/state`. Backend changes the running server hasn't loaded: exercise the logic via a standalone script, then ask the user to restart the server themselves (see above). For frontend/UI changes, load the page and exercise the affected flow in the browser; hold to a high bar on the UI (pixel-level polish, keyboard operability, focus states — the README's accessibility section is the standard to maintain).
 - **Two source files do most of the work.** Prefer editing `server.js` / `app.js` over adding new files.
 
 ## CI
