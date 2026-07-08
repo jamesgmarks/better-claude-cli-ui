@@ -8,6 +8,7 @@ import path from 'path';
 import os from 'os';
 import http from 'http';
 import { fileURLToPath } from 'url';
+import { detectSandbox, projectDevcontainerConfig } from './bin/sandbox-launch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
@@ -427,7 +428,8 @@ function getState() {
     activeProfileId,
     terminal: { sessions: sessionList() },
     // sessions that were live before the last restart, offered for one-click restore
-    pendingRestore: pendingRestore.map(s => ({ cwd: s.cwd, profile: s.profile })),
+    pendingRestore: pendingRestore.map(s => ({ cwd: s.cwd, profile: s.profile, sandbox: !!s.sandbox })),
+    sandbox: sandboxInfo,
     account: cj.oauthAccount ? {
       email: cj.oauthAccount.emailAddress,
       organization: cj.oauthAccount.organizationName,
@@ -568,6 +570,38 @@ setTimeout(checkForUpdates, 15_000);            // shortly after boot
 setInterval(checkForUpdates, 6 * 3600 * 1000);  // then every 6 hours
 
 // ---------------------------------------------------------------------------
+// Sandboxed sessions — capability detection + per-project devcontainer trust.
+// A sandboxed session runs `claude` inside a devcontainer via
+// bin/sandbox-launch.js; without Docker everything else works unchanged and
+// sandboxInfo.reason tells the UI what's missing.
+// ---------------------------------------------------------------------------
+let sandboxInfo = { available: false, reason: 'checking…', checkedAt: null };
+
+async function checkSandbox() {
+  const r = await detectSandbox();
+  const changed = r.available !== sandboxInfo.available || r.reason !== sandboxInfo.reason;
+  sandboxInfo = { ...r, checkedAt: Date.now() };
+  if (changed) broadcastEvent({ type: 'state' });
+  return sandboxInfo;
+}
+checkSandbox();
+
+// Once-per-project decision for repos that ship their own .devcontainer/
+// (their config can mount arbitrary host paths, so first use needs explicit
+// confirmation): 'project' = use the repo's config, 'bundled' = use Deck's.
+const SANDBOX_TRUST_FILE = path.join(HOME, '.claude-deck-sandbox-trust.json');
+
+function sandboxTrust() {
+  return readJsonFile(SANDBOX_TRUST_FILE).json || {};
+}
+
+function setSandboxTrust(project, decision) {
+  const all = sandboxTrust();
+  all[project] = { decision, decidedAt: Date.now() };
+  fs.writeFileSync(SANDBOX_TRUST_FILE, JSON.stringify(all, null, 2));
+}
+
+// ---------------------------------------------------------------------------
 // PTY sessions — multiple concurrent claude processes, one per tab in the UI
 // ---------------------------------------------------------------------------
 const SCROLLBACK_MAX = 400_000;
@@ -590,7 +624,7 @@ function saveSessionSnapshot() {
   try {
     const live = orderedSids().map(sid => sessions.get(sid))
       .filter(s => s && s.status !== 'exited')
-      .map(s => ({ cwd: s.cwd, profile: s.profile, args: s.args, label: s.label || null }));
+      .map(s => ({ cwd: s.cwd, profile: s.profile, args: s.args, label: s.label || null, sandbox: !!s.sandbox }));
     fs.writeFileSync(SESSION_SNAPSHOT_FILE, JSON.stringify({ savedAt: Date.now(), sessions: live }));
   } catch {}
 }
@@ -636,7 +670,7 @@ const orderedSids = () => {
   const extra = [...sessions.keys()].filter(sid => !known.includes(sid));
   return [...known, ...extra];
 };
-const sessionInfo = (sid, s) => ({ sid, pid: s.pid, cwd: s.cwd, args: s.args, status: s.status, activity: s.activity || 'working', createdAt: s.createdAt, profile: s.profile, cols: s.pty?.cols, rows: s.pty?.rows, label: s.label ?? null, order: orderedSids().indexOf(sid) });
+const sessionInfo = (sid, s) => ({ sid, pid: s.pid, cwd: s.cwd, args: s.args, status: s.status, activity: s.activity || 'working', createdAt: s.createdAt, profile: s.profile, sandbox: !!s.sandbox, cols: s.pty?.cols, rows: s.pty?.rows, label: s.label ?? null, order: orderedSids().indexOf(sid) });
 const sessionList = () => orderedSids().map(sid => sessionInfo(sid, sessions.get(sid)));
 
 // ---------------------------------------------------------------------------
@@ -671,7 +705,7 @@ setInterval(() => {
   }
 }, 1000);
 
-function startSession({ cwd: dir, args = [], cols = 120, rows = 32, profile: profileId, label } = {}) {
+function startSession({ cwd: dir, args = [], cols = 120, rows = 32, profile: profileId, label, sandbox = false } = {}) {
   const resolved = path.resolve(String(dir || cwd).replace(/^~(?=\/|$)/, HOME));
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
     throw new Error('not a directory: ' + resolved);
@@ -683,13 +717,30 @@ function startSession({ cwd: dir, args = [], cols = 120, rows = 32, profile: pro
   // run concurrently; the default passes the environment through untouched, so
   // single-profile behaviour is byte-for-byte what it was before.
   if (!prof.isDefault) env.CLAUDE_CONFIG_DIR = prof.configDir;
-  const proc = pty.spawn('claude', (Array.isArray(args) ? args : []).map(String), {
+  const claudeArgs = (Array.isArray(args) ? args : []).map(String);
+  let file = 'claude', spawnArgs = claudeArgs;
+  if (sandbox) {
+    // jail the session in a devcontainer: the launcher becomes the PTY process
+    if (!sandboxInfo.available) throw new Error('sandbox unavailable: ' + sandboxInfo.reason);
+    // a repo's own .devcontainer/ is used only after explicit per-project
+    // confirmation; undecided or declined falls back to the bundled config
+    const useProjectDc = !!projectDevcontainerConfig(resolved)
+      && sandboxTrust()[resolved]?.decision === 'project';
+    file = process.execPath;
+    spawnArgs = [
+      path.join(__dirname, 'bin', 'sandbox-launch.js'),
+      '--config-dir', prof.configDir, '--claude-json', prof.claudeJson,
+      ...(useProjectDc ? ['--project-devcontainer'] : []),
+      '--', ...claudeArgs,
+    ];
+  }
+  const proc = pty.spawn(file, spawnArgs, {
     name: 'xterm-256color',
     cols: cols > 0 ? cols : 120, rows: rows > 0 ? rows : 32,
     cwd: resolved,
     env,
   });
-  const sess = { pty: proc, cwd: resolved, args, scrollback: '', status: 'running', pid: proc.pid, createdAt: Date.now(), profile: prof.id, label: (typeof label === 'string' && label.trim()) ? label.trim().slice(0, 60) : null };
+  const sess = { pty: proc, cwd: resolved, args, scrollback: '', status: 'running', pid: proc.pid, createdAt: Date.now(), profile: prof.id, sandbox: !!sandbox, label: (typeof label === 'string' && label.trim()) ? label.trim().slice(0, 60) : null };
   sessions.set(sid, sess);
   sessionOrder.push(sid);
   saveSessionSnapshot();
@@ -1078,7 +1129,7 @@ app.post('/api/sessions/restore', (req, res) => {
   let started = 0;
   for (const item of pendingRestore) {
     if (live.has((item.profile || '') + '\0' + item.cwd)) continue;
-    try { startSession({ cwd: item.cwd, profile: item.profile, args: restoreArgs(item.args), label: item.label }); started++; }
+    try { startSession({ cwd: item.cwd, profile: item.profile, args: restoreArgs(item.args), label: item.label, sandbox: item.sandbox }); started++; }
     catch {}
   }
   pendingRestore = [];
@@ -1105,6 +1156,32 @@ app.post('/api/profile', (req, res) => {
   setupWatchers();
   broadcastEvent({ type: 'state' });
   res.json({ ok: true, profile: { id: prof.id, label: prof.label, configDir: prof.configDir } });
+});
+
+// re-run sandbox capability detection (e.g. after the user starts Docker)
+app.post('/api/sandbox/check', async (req, res) => {
+  res.json(await checkSandbox());
+});
+
+// does this project ship its own .devcontainer/, and what did the user decide?
+app.get('/api/sandbox/project', (req, res) => {
+  const project = path.resolve(String(req.query.path || cwd).replace(/^~(?=\/|$)/, HOME));
+  res.json({
+    hasDevcontainer: !!projectDevcontainerConfig(project),
+    decision: sandboxTrust()[project]?.decision ?? null,
+  });
+});
+
+// record the once-per-project choice for a repo with its own .devcontainer/
+app.post('/api/sandbox/trust', (req, res) => {
+  const { path: p, decision } = req.body || {};
+  try {
+    if (!['project', 'bundled'].includes(decision)) throw new Error('decision must be "project" or "bundled"');
+    const project = path.resolve(String(p || '').replace(/^~(?=\/|$)/, HOME));
+    if (!fs.statSync(project).isDirectory()) throw new Error('not a directory');
+    setSandboxTrust(project, decision);
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ error: String(e.message) }); }
 });
 
 // ---------------------------------------------------------------------------

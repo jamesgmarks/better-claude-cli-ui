@@ -446,7 +446,7 @@ function renderSessionTabs() {
     return el('div', {
       class: 'sess-tab' + (sid === activeSid ? ' active' : '') + (act === 'exited' ? ' dead' : '')
         + ' act-' + ui.cls + (canReorder ? ' draggable' : ''),
-      title: `${info.label ? info.label + '\n' : ''}${ui.hint}\n${info.cwd || ''}${prof ? '\nprofile: ' + prof.label : ''}${info.args?.length ? '\nclaude ' + info.args.join(' ') : ''}`,
+      title: `${info.label ? info.label + '\n' : ''}${ui.hint}${info.sandbox ? '\n🛡 sandboxed — claude runs jailed in a devcontainer' : ''}\n${info.cwd || ''}${prof ? '\nprofile: ' + prof.label : ''}${info.args?.length ? '\nclaude ' + info.args.join(' ') : ''}`,
       draggable: canReorder ? 'true' : 'false',
       ondragstart: e => { dragSid = sid; e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', sid); } catch {} e.currentTarget.classList.add('dragging'); },
       ondragend: e => { dragSid = null; e.currentTarget.classList.remove('dragging'); clearDropMarks(); },
@@ -461,6 +461,7 @@ function renderSessionTabs() {
     },
       kbdNum != null ? el('span', { class: 'sess-num', 'aria-hidden': 'true' }, String(kbdNum)) : null,
       el('span', { class: 'sess-dot ' + ui.cls, 'aria-hidden': 'true' }),
+      info.sandbox ? el('span', { class: 'sess-shield', 'aria-label': 'sandboxed session' }, '🛡') : null,
       prof ? el('span', { class: 'sess-prof' }, prof.label) : null,
       labelNode,
       act === 'question' ? el('span', { class: 'sess-ask' }, '?') : null,
@@ -685,13 +686,15 @@ $('#flag-autofocus').onchange = e => {
 // session-started is broadcast to every client, so this flag marks the one
 // start WE initiated as the tab to prompt a label for.
 let promptLabelOnStart = false;
-function startClaude(extra = [], cwdOverride = null, profileOverride = null) {
+function startClaude(extra = [], cwdOverride = null, profileOverride = null, { sandbox = false, skipPerms = false } = {}) {
   promptLabelOnStart = true;
   const args = [...extra];
-  if ($('#flag-skip').checked) args.push('--dangerously-skip-permissions');
+  if (($('#flag-skip').checked || skipPerms) && !args.includes('--dangerously-skip-permissions')) {
+    args.push('--dangerously-skip-permissions');
+  }
   const typed = $('#extra-args').value.trim();
   if (typed) args.push(...typed.split(/\s+/));
-  wsSend({ type: 'start', cwd: cwdOverride || state?.cwd, args, cols: 120, rows: 32, profile: profileOverride || state?.activeProfileId });
+  wsSend({ type: 'start', cwd: cwdOverride || state?.cwd, args, cols: 120, rows: 32, profile: profileOverride || state?.activeProfileId, sandbox });
 }
 
 $('#btn-start').onclick = () => openDirPicker('new-session');
@@ -885,7 +888,7 @@ function renderRestoreBanner() {
   }
   const n = list.length;
   setChildren(banner,
-    el('span', {}, `↻ ${n} session${n === 1 ? '' : 's'} were open before the last restart: ${list.map(s => shortDir(s.cwd)).join(', ')}`),
+    el('span', {}, `↻ ${n} session${n === 1 ? '' : 's'} were open before the last restart: ${list.map(s => (s.sandbox ? '🛡' : '') + shortDir(s.cwd)).join(', ')}`),
     el('button', { class: 'tiny primary', onclick: e => busy(e.currentTarget, restoreSessions) }, 'Restore all'),
     el('button', { class: 'tiny', onclick: e => busy(e.currentTarget, dismissRestore) }, 'Dismiss'),
     el('span', { class: 'hint' }, 'reopens each folder with --continue'),
@@ -949,6 +952,28 @@ function openDirPicker(mode = 'cwd', startArgs = []) {
       el('option', { value: p.id }, p.isDefault && p.label !== 'default' ? `${p.label} · default` : p.label)));
     profSel.value = state.activeProfileId;
   }
+  // sandbox toggle: run this session's claude jailed in a devcontainer. When
+  // Docker/devcontainer support is missing it stays visible but disabled, with
+  // the reason (and install pointer) spelled out underneath.
+  const sbRow = $('#dir-sandbox-row'), sbCb = $('#dir-sandbox'), sbHint = $('#dir-sandbox-hint');
+  sbRow.hidden = mode !== 'new-session';
+  sbCb.checked = false;
+  $('#dir-skip-row').hidden = true;
+  sbHint.hidden = true;
+  if (mode === 'new-session') {
+    const sb = state?.sandbox;
+    sbCb.disabled = !sb?.available;
+    sbCb.parentElement.title = sb?.available
+      ? 'Run claude inside a locked-down Linux devcontainer (read-only config, egress firewall) — makes --dangerously-skip-permissions safe'
+      : (sb?.reason || 'checking sandbox support…');
+    if (!sb?.available) { sbHint.hidden = false; sbHint.textContent = '🛡 sandbox unavailable: ' + (sb?.reason || 'checking…'); }
+    // skip-permissions is the point of sandboxing, so it defaults on — but
+    // it's a visible checkbox the user can turn off, never a silent inject
+    sbCb.onchange = () => {
+      $('#dir-skip-row').hidden = !sbCb.checked;
+      if (sbCb.checked) $('#dir-skip').checked = true;
+    };
+  }
   $('#dir-modal').showModal();
   browseTo(state.cwd);
 }
@@ -966,12 +991,25 @@ $('#dir-select').onclick = e => busy(e.currentTarget, async () => {
   try {
     await api('POST', '/api/cwd', { cwd: chosen });
     if (dirPickerMode === 'new-session') {
+      const sandbox = $('#dir-sandbox').checked && !$('#dir-sandbox').disabled;
+      if (sandbox) {
+        // repos shipping their own .devcontainer/ need one explicit choice per
+        // project — their config can mount arbitrary host paths
+        const info = await api('GET', '/api/sandbox/project?path=' + encodeURIComponent(chosen));
+        if (info.hasDevcontainer && !info.decision) {
+          const useTheirs = confirm(`${shortDir(chosen)} ships its own .devcontainer/.\n\n`
+            + `OK — sandbox with the project's own devcontainer (it can mount arbitrary host paths and has NO egress firewall unless the repo provides one; only for repos you trust).\n`
+            + `Cancel — sandbox with Deck's bundled config instead.\n\n`
+            + `Remembered for this project.`);
+          await api('POST', '/api/sandbox/trust', { path: chosen, decision: useTheirs ? 'project' : 'bundled' });
+        }
+      }
       // pass the folder (and profile) explicitly so the session starts there
       // regardless of when the cwd change propagates back through state
-      startClaude(dirPickerArgs, chosen, profileId);
+      startClaude(dirPickerArgs, chosen, profileId, { sandbox, skipPerms: sandbox && $('#dir-skip').checked });
       const prof = profileId && profileId !== state.activeProfileId
         && (state.profiles || []).find(p => p.id === profileId);
-      toast((dirPickerArgs.includes('--continue') ? 'Continuing in ' : 'New session in ')
+      toast((sandbox ? '🛡 Sandboxed session in ' : dirPickerArgs.includes('--continue') ? 'Continuing in ' : 'New session in ')
         + chosen + (prof ? ` · ${prof.label}` : ''));
     } else {
       toast('Working directory: ' + chosen);

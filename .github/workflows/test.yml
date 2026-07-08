@@ -38,6 +38,18 @@ jobs:
           curl -sf -X POST http://127.0.0.1:3456/api/update/check
           kill $SERVER_PID
 
+      # Linux runners have Docker; macOS/Windows ones don't (no nested Linux VM),
+      # which is exactly the case Deck's capability detection handles gracefully.
+      - name: Sandbox devcontainer smoke test (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p /tmp/deck-fixture-project /tmp/deck-fixture-config
+          cd /tmp/deck-fixture-project
+          node "$GITHUB_WORKSPACE/bin/sandbox-launch.js" --config-dir /tmp/deck-fixture-config --smoke
+          # transcript persistence: the RW project mount must exist on the host side
+          test -d /tmp/deck-fixture-config/projects
+          echo "sandbox smoke test passed"
+
       - name: deck.js install (from this checkout, not origin)
         env:
           DECK_REPO_URL: ${{ github.workspace }}

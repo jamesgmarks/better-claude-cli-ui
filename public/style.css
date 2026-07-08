@@ -447,6 +447,14 @@ dialog#dir-modal[open] { display: flex; }
 }
 .dir-profile { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 .dir-profile[hidden] { display: none; }
+/* sandbox toggle in the new-session footer, same flag styling as the toolbar */
+.dir-sandbox { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.dir-sandbox[hidden], .dir-sandbox .flag[hidden] { display: none; }
+.dir-sandbox .flag { color: var(--muted); font-size: 11px; display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.dir-sandbox .flag:has(input:disabled) { opacity: 0.55; cursor: not-allowed; }
+#dir-sandbox-hint { padding: 0 14px 10px; }
+#dir-sandbox-hint[hidden] { display: none; }
+.sess-shield { font-size: 11px; flex: 0 0 auto; filter: saturate(0.8); }
 /* the selected-path label yields space (and wraps) so the profile picker and
    the action button always stay on screen, even with a long path */
 #dir-current { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }

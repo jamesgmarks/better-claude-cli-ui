@@ -66,6 +66,24 @@ Terminal toolbar: Start / Continue (`--continue`) / Stop, a `--dangerously-skip-
 
 > Settings file edits apply to **new** Claude sessions — open a new tab to pick them up. Commands like `/model` affect the running session directly.
 
+## Sandboxed sessions 🛡
+
+The new-session dialog has a **sandboxed** toggle: that session's `claude` runs inside a locked-down Linux [devcontainer](https://containers.dev) (adapted from [Anthropic's reference config](https://github.com/anthropics/claude-code/tree/main/.devcontainer)), making `--dangerously-skip-permissions` safe to use — it's offered as a pre-checked checkbox when you enable the toggle (uncheck it to keep permission prompts).
+
+What the jail enforces:
+
+- **Read-only config** — your profile's whole config dir (settings, hooks, `CLAUDE.md`, skills, commands, agents, plugins) is visible to the sandboxed Claude but not writable, so it can't plant anything a future *unsandboxed* session would execute or obey. `.claude.json` (which carries MCP server definitions) is copied in at boot and never synced back, closing the MCP-injection escape route.
+- **Sessions still persist to the host** — transcripts (`projects/`), todos, and shell snapshots are read-write, so after the sandbox exits, plain `claude --continue` on your machine resumes the conversation. Credentials are shared read-write so long sessions can refresh OAuth tokens; if a refresh-write ever fails inside the container, the worst case is logging in again — the host copy can't be silently replaced.
+- **Egress firewall** — default-deny iptables inside the container; only the Anthropic API, npm, GitHub, and Sentry/Statsig are reachable.
+- **The project folder is the only writable host path** besides those session dirs.
+
+Requirements & honest caveats:
+
+- **Needs a running Docker engine** — Docker Desktop ([macOS](https://docs.docker.com/desktop/setup/install/mac-install/) / [Windows](https://docs.docker.com/desktop/setup/install/windows-install/)), OrbStack, Colima, or [Docker Engine on Linux](https://docs.docker.com/engine/install/) all work; the container is Linux on every host, so the firewall behaves identically everywhere. **No Docker ⇒ no sandbox toggle** (it's disabled with the reason and an install pointer); everything else about Deck is unchanged.
+- The first boot per project builds the image (a few minutes, logs stream into the tab); later sessions reuse the container and start fast. Containers aren't auto-removed — `docker ps` shows them, `docker rm -f` cleans up.
+- If a repo ships its own `.devcontainer/`, Deck asks once per project whether to use it (a repo's config can mount arbitrary host paths, and its image has **no egress firewall** unless the repo provides one — only accept for repos you trust) or Deck's bundled config.
+- On Windows hosts the project mounts at `/workspaces/<name>` inside the container, so host-side `claude --continue` can't see sandboxed transcripts for that project (re-opening a *sandboxed* session still resumes fine).
+
 ## Accessibility & UX
 
 Audited against ui-ux-pro-max's 99 UX guidelines: full keyboard operability (cards, list rows, deletes, tabs, and the panel divider are all focusable and Enter/Space-operable), ARIA roles/labels/`aria-live` announcements, visible blue focus rings, ≥4.5:1 text contrast, confirmation on destructive actions, disabled-while-pending buttons, empty/loading/no-results states everywhere, `prefers-reduced-motion` support, 44px touch targets on coarse pointers, deep-linkable tabs (`?tab=git`), and non-blocking font loading with `display=swap`.
