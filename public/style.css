@@ -165,6 +165,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
    flashing red + ? = asking you something, grey = exited */
 .sess-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
 .sess-dot.working { background: var(--green); animation: pulse 1.6s ease-in-out infinite; }
+.sess-dot.booting { background: none; border: 2px solid var(--border); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
 .sess-dot.ready { background: var(--yellow); box-shadow: 0 0 5px var(--yellow); }
 .sess-dot.question { background: var(--red); animation: urgent 0.9s ease-in-out infinite; }
 .sess-dot.off { background: #64748B; }
@@ -176,6 +177,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   animation: urgent 0.9s ease-in-out infinite;
 }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes spin { to { transform: rotate(360deg); } }
 @keyframes urgent { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 .sess-close {
   background: none; border: none; color: var(--muted);

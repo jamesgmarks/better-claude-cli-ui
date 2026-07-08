@@ -8,7 +8,7 @@ import path from 'path';
 import os from 'os';
 import http from 'http';
 import { fileURLToPath } from 'url';
-import { detectSandbox, projectDevcontainerConfig } from './bin/sandbox-launch.js';
+import { detectSandbox, projectDevcontainerConfig, SANDBOX_READY_MARK } from './bin/sandbox-launch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
@@ -688,6 +688,13 @@ const QUESTION_RE = /(Do you want|Would you like|Allow this|Allow \w+|Grant acce
 
 function classifyActivity(s) {
   if (s.status === 'exited') return 'exited';
+  // a sandboxed session is "booting" until the launcher hands the TTY to
+  // claude — image builds pause for long stretches (downloads) and must not
+  // read as "your turn"
+  if (s.sandbox && !s.sandboxReady) {
+    if (s.scrollback.includes(SANDBOX_READY_MARK)) s.sandboxReady = true;
+    else return 'booting';
+  }
   const quiet = Date.now() - (s.lastDataAt || s.createdAt);
   if (quiet < 2500) return 'working';
   // only the tail — roughly the currently visible screen, not old scrollback

@@ -362,7 +362,7 @@ window.addEventListener('keydown', e => {
 let autoFocus = localStorage.getItem('autoFocus') === '1';
 let lastAutoSwitch = 0;
 
-const ATTENTION_ORDER = { question: 0, ready: 1, working: 2, exited: 3 };
+const ATTENTION_ORDER = { question: 0, ready: 1, working: 2, booting: 2, exited: 3 };
 
 function orderedTerms() {
   const entries = [...terms.entries()];
@@ -386,7 +386,7 @@ function typingGuardOk(t) {
 function maybeAutoFocus() {
   if (!autoFocus) return;
   const active = terms.get(activeSid);
-  if (!active || activityOf(active.info) !== 'working') return; // never leave a tab that needs you
+  if (!active || !['working', 'booting'].includes(activityOf(active.info))) return; // never leave a tab that needs you
   if (!typingGuardOk(active)) return;
   if (Date.now() - lastAutoSwitch < 2000) return;
   const next = orderedTerms().find(([sid, t]) =>
@@ -400,6 +400,7 @@ function maybeAutoFocus() {
 
 // agent state → how the tab signals it, at a glance
 const ACTIVITY_UI = {
+  booting: { cls: 'booting', label: 'booting sandbox…', hint: 'Booting the sandbox container — the first boot builds an image and takes a few minutes' },
   working: { cls: 'working', label: 'working…', hint: 'Claude is working — no action needed' },
   ready: { cls: 'ready', label: 'your turn', hint: 'Claude is done / idle — waiting on you' },
   question: { cls: 'question', label: '❓ asking you', hint: 'Claude is asking a question or needs permission' },
@@ -571,7 +572,7 @@ function updateDocTitle() {
     const a = activityOf(t.info || {});
     if (a === 'question') asking++;
     else if (a === 'ready') ready++;
-    else if (a === 'working') working++;
+    else if (a === 'working' || a === 'booting') working++;
   }
   const parts = [];
   if (asking) parts.push(`❓${asking}`);

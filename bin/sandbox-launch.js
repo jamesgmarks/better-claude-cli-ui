@@ -49,6 +49,10 @@ const C_CONFIG_HOST = '/deck/claude-config-host';
 // written constantly by the CLI, never executed by the host)
 const RW_DIRS = ['projects', 'todos', 'shell-snapshots', 'file-history', 'statsig'];
 
+// printed when the container is up and claude is about to take over the TTY;
+// server.js watches session output for it to end the tab's "booting" state
+export const SANDBOX_READY_MARK = '🛡 sandbox ready — launching claude';
+
 const sh = (cmd, args, opts = {}) => new Promise(resolve =>
   execFile(cmd, args, { timeout: 60_000, maxBuffer: 4_000_000, ...opts },
     (err, stdout, stderr) => resolve({ err, stdout: String(stdout || ''), stderr: String(stderr || '') })));
@@ -285,7 +289,14 @@ async function bootContainer({ hostCwd, configDir, claudeJson, projectConfig }) 
     '--id-label', `claude-deck.shape=${shape}`,
   ];
 
-  console.log(`🛡 Claude Deck sandbox — ${projectConfig ? 'this project’s own devcontainer' : 'bundled devcontainer'} (first boot builds the image; later sessions reuse it)`);
+  // an existing container with these exact labels means a warm start (seconds);
+  // none means an image build is coming — say so, or the wait looks like a hang
+  const probe = await sh('docker', ['ps', '-aq',
+    ...idLabels.filter(a => a !== '--id-label').flatMap(l => ['--filter', `label=${l}`])]);
+  console.log(`🛡 Claude Deck sandbox — ${projectConfig ? 'this project’s own devcontainer' : 'bundled devcontainer'}`);
+  if (!probe.stdout.trim()) {
+    console.log('⏳ First boot for this project/config — building the container image, typically 2–5 minutes (build logs stream below). Later sessions reuse it and start in seconds.');
+  }
   const up = await runDevcontainer([
     'up', '--workspace-folder', hostCwd, '--override-config', overridePath, ...idLabels,
   ]);
@@ -362,6 +373,7 @@ async function main() {
   if (!boot) process.exit(1);
 
   const tty = process.stdin.isTTY && process.stdout.isTTY;
+  console.log(SANDBOX_READY_MARK);
   const claudeArgs = opts.smoke && !opts.claudeArgs.length ? ['--version'] : opts.claudeArgs;
   // docker (not devcontainer) exec: the docker CLI forwards TTY resizes, which
   // the claude TUI needs; `sh -l` so the image's login PATH finds claude
