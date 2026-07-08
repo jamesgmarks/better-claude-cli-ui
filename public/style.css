@@ -440,11 +440,13 @@ dialog#dir-modal[open] { display: flex; }
 .dir-item:hover { background: var(--bg3); }
 .dir-item.dim { color: var(--muted); }
 .dir-icon { flex: 0 0 auto; }
+/* stacked compact rows: flags / profile+action / selected path */
 .modal-foot {
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 14px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 8px 14px; border-top: 1px solid var(--border);
   font-size: 12px;
 }
+.foot-row { display: flex; align-items: center; gap: 8px; }
 .dir-profile { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 .dir-profile[hidden] { display: none; }
 /* sandbox toggle in the new-session footer, same flag styling as the toolbar */
@@ -455,9 +457,8 @@ dialog#dir-modal[open] { display: flex; }
 #dir-sandbox-hint { padding: 0 14px 10px; }
 #dir-sandbox-hint[hidden] { display: none; }
 .sess-shield { font-size: 11px; flex: 0 0 auto; filter: saturate(0.8); }
-/* the selected-path label yields space (and wraps) so the profile picker and
-   the action button always stay on screen, even with a long path */
-#dir-current { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+#dir-current { font-size: 11px; min-width: 0; overflow-wrap: anywhere; }
+#dir-current:empty { display: none; }
 #dir-select { flex: 0 0 auto; }
 #cwd-input { cursor: pointer; }
 #cwd-input:hover { border-color: var(--accent-dim); }

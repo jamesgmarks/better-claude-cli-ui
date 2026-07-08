@@ -92,16 +92,18 @@
     </div>
     <div id="dir-list"></div>
     <div class="modal-foot">
-      <span id="dir-current" class="muted"></span>
-      <div class="spacer"></div>
-      <span class="dir-sandbox" id="dir-sandbox-row" hidden>
+      <div class="dir-sandbox" id="dir-sandbox-row" hidden>
         <label class="flag"><input type="checkbox" id="dir-sandbox"> 🛡 sandboxed</label>
         <label class="flag" id="dir-skip-row" hidden title="Safe inside the sandbox — the container is the permission boundary. Uncheck to keep permission prompts."><input type="checkbox" id="dir-skip" checked> --dangerously-skip-permissions</label>
-      </span>
-      <span class="dir-profile" id="dir-profile-row" hidden>
-        <select id="dir-profile-select" aria-label="Profile for this session" title="Which Claude config/account this session runs under"></select>
-      </span>
-      <button id="dir-select" class="primary">Use this folder</button>
+      </div>
+      <div class="foot-row">
+        <span class="dir-profile" id="dir-profile-row" hidden>
+          <select id="dir-profile-select" aria-label="Profile for this session" title="Which Claude config/account this session runs under"></select>
+        </span>
+        <div class="spacer"></div>
+        <button id="dir-select" class="primary">Use this folder</button>
+      </div>
+      <span id="dir-current" class="muted"></span>
     </div>
     <div id="dir-sandbox-hint" class="hint" hidden></div>
   </dialog>
