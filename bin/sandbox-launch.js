@@ -174,6 +174,35 @@ export function symlinkTargetMounts(configDir) {
   return mounts;
 }
 
+// Hooks reference commands by absolute host path (e.g. ~/.claude-shared/
+// hooks/x.sh) that doesn't exist inside the container. Mount each referenced
+// path that lives under the user's HOME dir read-only at its identical path —
+// the same rule as symlink targets. Home-only on purpose: mirroring /usr or
+// /bin would shadow the container's Linux binaries with host (macOS) ones.
+export function hookScriptMounts(configDir) {
+  if (process.platform === 'win32') return [];
+  const home = os.homedir() + path.sep;
+  const targets = new Set();
+  for (const f of ['settings.json', 'settings.local.json']) {
+    let hooks;
+    try { hooks = parseJsonc(fs.readFileSync(path.join(configDir, f), 'utf8')).hooks; } catch { continue; }
+    for (const entries of Object.values(hooks || {})) {
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) for (const h of entry?.hooks || []) {
+        for (const tok of String(h?.command || '').split(/\s+/)) {
+          if (tok.startsWith(home) && !tok.startsWith(configDir + path.sep) && fs.existsSync(tok)) targets.add(tok);
+        }
+      }
+    }
+  }
+  const mounts = [];
+  for (const t of [...targets].sort().slice(0, 16)) {
+    try { mounts.push(mountString(t, t, { readonly: true })); }
+    catch { console.log(`note: skipping unmountable hook path ${t}`); }
+  }
+  return mounts;
+}
+
 // Build the override devcontainer.json: the base config (bundled, or the
 // project's own when trusted) plus the three-tier config-dir mounts and a
 // workspace mount at the HOST path, so transcripts inside the container land
@@ -208,13 +237,16 @@ export function buildOverrideConfig({ baseConfigPath, hostCwd, configDir, creden
     ...RW_DIRS.map(d => mountString(path.join(configDir, d), `${C_CONFIG}/${d}`)),
     // out-of-tree symlink targets, read-only at their own paths (see above)
     ...symlinkTargetMounts(configDir),
+    // hook scripts referenced by absolute path, read-only likewise
+    ...hookScriptMounts(configDir),
   ];
   // Tier 3b — credentials: reads for auth, writes for OAuth refresh. A bind
   // mountpoint can't be renamed or unlinked from inside the container, so a
   // rename-style refresh write fails loudly (worst case: re-login) and the
   // host file can never be silently replaced.
   if (credentials) mounts.push(mountString(credentials, `${C_CONFIG}/.credentials.json`));
-  cfg.mounts = [...(cfg.mounts || []), ...mounts];
+  // a hook script can also be a symlink target — mount each path once
+  cfg.mounts = [...new Set([...(cfg.mounts || []), ...mounts])];
 
   cfg.containerEnv = { ...(cfg.containerEnv || {}), CLAUDE_CONFIG_DIR: C_CONFIG };
   return cfg;
