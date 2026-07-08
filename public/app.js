@@ -413,6 +413,10 @@ function activityOf(info) {
 
 function renderSessionTabs() {
   const bar = $('#session-tabs');
+  // a re-render mid-rename (any activity ping) must not eat what's been typed:
+  // carry the live input's value and caret across the rebuild
+  const liveRename = bar.querySelector('.sess-rename');
+  const renameState = liveRename && { value: liveRename.value, start: liveRename.selectionStart, end: liveRename.selectionEnd };
   const order = orderedTerms();
   const canReorder = !autoFocus && editingSid == null; // drag/keyboard only in manual mode
   const tabs = order.map(([sid, t], i) => {
@@ -480,7 +484,11 @@ function renderSessionTabs() {
     title: 'Pick a folder, then start a new Claude session there',
     onclick: () => openDirPicker('new-session'),
   }, '+ New'));
-  if (editingSid != null) { const inp = bar.querySelector('.sess-rename'); if (inp) { inp.focus(); inp.select(); } }
+  if (editingSid != null) {
+    const inp = bar.querySelector('.sess-rename');
+    if (inp && renameState) { inp.value = renameState.value; inp.focus(); inp.setSelectionRange(renameState.start, renameState.end); }
+    else if (inp) { inp.focus(); inp.select(); } // fresh edit: select-all to overtype
+  }
   updateDocTitle();
 }
 

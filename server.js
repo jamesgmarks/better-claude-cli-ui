@@ -697,8 +697,10 @@ function classifyActivity(s) {
   }
   const quiet = Date.now() - (s.lastDataAt || s.createdAt);
   if (quiet < 2500) return 'working';
-  // only the tail — roughly the currently visible screen, not old scrollback
-  const tail = stripAnsi(s.scrollback.slice(-2000));
+  // only the latest paint burst — TUIs repaint with cursor moves, not appends,
+  // so a fixed scrollback window keeps long-gone text (a stale "Press Enter to
+  // continue…" would read as a question forever)
+  const tail = stripAnsi(s.recentOut || '');
   return QUESTION_RE.test(tail.slice(-1200)) ? 'question' : 'ready';
 }
 
@@ -753,6 +755,9 @@ function startSession({ cwd: dir, args = [], cols = 120, rows = 32, profile: pro
   saveSessionSnapshot();
   proc.onData(d => {
     sess.scrollback = (sess.scrollback + d).slice(-SCROLLBACK_MAX);
+    // a >2.5s gap starts a new paint burst (see classifyActivity)
+    const gap = Date.now() - (sess.lastDataAt || 0);
+    sess.recentOut = ((gap > 2500 ? '' : sess.recentOut || '') + d).slice(-4000);
     sess.lastDataAt = Date.now();
     broadcastTerm({ type: 'data', sid, data: d });
   });
