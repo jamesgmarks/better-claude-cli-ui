@@ -298,12 +298,21 @@ async function bootContainer({ hostCwd, configDir, claudeJson, projectConfig }) 
   // macOS stores Claude credentials in the Keychain, not a file. The Linux
   // container can't reach the Keychain, so seed a copy at boot (copy only,
   // never synced back — refreshed tokens stay in the container; worst case is
-  // a re-login, same as the file-bind path).
+  // a re-login, same as the file-bind path). Claude Code keys the entry per
+  // profile: "Claude Code-credentials-<sha256(configDir) first 8 hex>" when
+  // CLAUDE_CONFIG_DIR is set, the bare name for the plain default. Only the
+  // default dir may fall back to the bare entry — for any other profile it
+  // would seed a DIFFERENT account's login.
   let keychainCreds = null;
   if (!credentials && process.platform === 'darwin') {
-    const { err, stdout } = await sh('security',
-      ['find-generic-password', '-w', '-s', 'Claude Code-credentials'], { timeout: 30_000 });
-    if (!err && stdout.trim().startsWith('{')) keychainCreds = stdout.trim();
+    const suffix = crypto.createHash('sha256').update(configDir).digest('hex').slice(0, 8);
+    const services = [`Claude Code-credentials-${suffix}`];
+    if (configDir === path.join(os.homedir(), '.claude')) services.push('Claude Code-credentials');
+    for (const svc of services) {
+      const { err, stdout } = await sh('security',
+        ['find-generic-password', '-w', '-s', svc], { timeout: 30_000 });
+      if (!err && stdout.trim().startsWith('{')) { keychainCreds = stdout.trim(); break; }
+    }
   }
   if (!credentials && !keychainCreds) {
     console.log('note: no stored Claude credentials found for this profile — you may be asked to log in inside the sandbox (it will not persist to the host)');
