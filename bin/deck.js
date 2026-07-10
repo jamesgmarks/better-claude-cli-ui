@@ -328,11 +328,31 @@ const OS_IMPL = PLATFORM === 'linux' ? LX : PLATFORM === 'darwin' ? MAC : PLATFO
 // ---------------------------------------------------------------------------
 // commands
 // ---------------------------------------------------------------------------
+// A managed rollout can pin the claude executable up front with
+// `--claude-bin=/path`, for machines where auto-detection would miss it (custom
+// npm prefix, locked-down PATH, two installs). We write it into ~/.claude-deck.json
+// — the same file the server reads at startup — so it's one mechanism across all
+// OSes and stays editable afterward. Merges, so it won't clobber other keys.
+const CONFIG_FILE = path.join(HOME, '.claude-deck.json');
+function applyClaudeBinFlag() {
+  const arg = process.argv.find(a => a.startsWith('--claude-bin='));
+  if (!arg) return;
+  const bin = arg.slice('--claude-bin='.length).trim();
+  if (!bin) { log('  --claude-bin= given with no path — ignoring'); return; }
+  if (!fs.existsSync(bin)) log(`  warning: ${bin} does not exist yet — writing it anyway`);
+  let cfg = {};
+  try { cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) || {}; } catch {}
+  cfg.claudeBin = bin;
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2) + '\n');
+  log(`  pinned claude binary → ${bin} (in ${CONFIG_FILE})`);
+}
+
 function install() {
   if (!OS_IMPL) { log(`Unsupported platform: ${PLATFORM}`); process.exit(1); }
   log(`Installing Claude Deck (${PLATFORM})…`);
   cloneOrPull();
   const token = ensureToken();
+  applyClaudeBinFlag();
   OS_IMPL.install();
   printConnectHelp(token);
 }
@@ -365,5 +385,6 @@ else if (cmd === 'start') await import(PLATFORM === 'win32'
   : path.join(SELF_DIR, 'server.js'));
 else {
   log('usage: claude-deck [install|uninstall|status|start|stop]');
+  log('  install [--claude-bin=/path/to/claude]  pin the claude executable explicitly');
   process.exit(1);
 }
