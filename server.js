@@ -1,7 +1,7 @@
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import * as pty from 'node-pty';
-import { execFile, spawn } from 'child_process';
+import { execFile, execFileSync, spawn } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -35,6 +35,81 @@ let cwd = process.env.CLAUDE_UI_CWD || process.cwd();
 const expandHome = p => p.replace(/^~(?=\/|$)/, HOME);
 const DEFAULT_CONFIG_DIR = path.resolve(
   process.env.CLAUDE_CONFIG_DIR ? expandHome(process.env.CLAUDE_CONFIG_DIR) : path.join(HOME, '.claude'));
+
+// ---------------------------------------------------------------------------
+// Locating the `claude` executable
+//
+// Deck runs as a background service (systemd user service / LaunchAgent), which
+// hands us a stripped default PATH that omits the dirs where `claude` usually
+// installs (~/.local/bin, npm-global, nvm/fnm/volta, Homebrew). A bare `claude`
+// then fails to launch with "execvp(3) failed.: No such file or directory", and
+// `command -v claude` can't find it either. Nobody's PATH looks the same, so we
+// resolve it, in strict precedence, and every layer is overridable — auto
+// detection is a convenience, never a dead end:
+//
+//   1. explicit binary   CLAUDE_UI_CLAUDE_BIN=/path  or  ~/.claude-deck.json {"claudeBin"}
+//   2. login-shell PATH  what the user's own shell reports (adapts to any installer)
+//   3. static guess-list common bin dirs, last-ditch fallback
+//
+// Extra PATH dirs (not a full binary path) can be injected via CLAUDE_UI_PATH
+// or ~/.claude-deck.json {"extraPath": [...]}, which sit ahead of everything.
+// ---------------------------------------------------------------------------
+const DECK_CONFIG = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(HOME, '.claude-deck.json'), 'utf8')) || {}; }
+  catch { return {}; } // absent or malformed → no config, detection carries on
+})();
+
+// Ask the user's real login+interactive shell for its PATH. Login+interactive so
+// the rc files that actually set PATH (~/.profile, ~/.zshrc, fnm/volta shims…)
+// run; sentinels fence PATH off from any banner text those rc files print. POSIX
+// only — Windows inherits the user PATH normally and has no `execvp`. Bounded by
+// a timeout so a slow or broken rc file can't wedge startup.
+function loginShellPath() {
+  if (process.platform === 'win32') return null;
+  const shell = process.env.SHELL || '/bin/bash';
+  try {
+    const out = execFileSync(shell, ['-lic', 'printf "@@P@@%s@@E@@" "$PATH"'],
+      { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const m = out.match(/@@P@@([\s\S]*?)@@E@@/);
+    return m && m[1] ? m[1] : null;
+  } catch { return null; }
+}
+
+// Build the augmented PATH once, at load, before anything spawns claude:
+// override dirs → login-shell PATH → inherited PATH → static fallbacks, deduped
+// with first occurrence winning so precedence holds.
+process.env.PATH = (() => {
+  const overrideDirs = [
+    ...(process.env.CLAUDE_UI_PATH ? process.env.CLAUDE_UI_PATH.split(path.delimiter) : []),
+    ...(Array.isArray(DECK_CONFIG.extraPath) ? DECK_CONFIG.extraPath : []),
+  ].map(d => expandHome(String(d)));
+  const staticDirs = [
+    path.dirname(process.execPath),        // node's own dir — npm-global bins sit here
+    path.join(HOME, '.local', 'bin'),
+    path.join(HOME, 'bin'),
+    '/opt/homebrew/bin', '/usr/local/bin', // macOS (Apple-silicon / Intel Homebrew)
+  ];
+  const login = loginShellPath();
+  const parts = [
+    ...overrideDirs,
+    ...(login ? login.split(path.delimiter) : []),
+    ...(process.env.PATH ? process.env.PATH.split(path.delimiter) : []),
+    ...staticDirs,
+  ];
+  const seen = new Set();
+  return parts.filter(d => d && !seen.has(d) && seen.add(d)).join(path.delimiter);
+})();
+
+// The explicit-binary override, if one is set and real. Null → resolve `claude`
+// off the augmented PATH at spawn time (the common, zero-config case).
+const CLAUDE_BIN = (() => {
+  const explicit = process.env.CLAUDE_UI_CLAUDE_BIN || DECK_CONFIG.claudeBin;
+  if (!explicit) return null;
+  const p = path.resolve(expandHome(String(explicit)));
+  if (fs.existsSync(p)) return p;
+  console.error(`configured claude binary not found: ${p} — falling back to PATH resolution`);
+  return null;
+})();
 
 // Current Claude keeps .claude.json inside the config dir; older setups kept the
 // default one at ~/.claude.json. Prefer the inner file, fall back to the legacy
@@ -337,7 +412,7 @@ function listSessions(limit = 50) {
 // Aggregated state
 // ---------------------------------------------------------------------------
 let claudeVersion = '';
-execFile('claude', ['--version'], (err, stdout) => { if (!err) claudeVersion = stdout.trim(); });
+execFile(CLAUDE_BIN || 'claude', ['--version'], (err, stdout) => { if (!err) claudeVersion = stdout.trim(); });
 
 // ---------------------------------------------------------------------------
 // Built-in slash commands, extracted from the installed claude binary itself.
@@ -349,7 +424,7 @@ let builtinCommands = [];
 
 async function extractBuiltinCommands() {
   try {
-    const which = await new Promise((res, rej) =>
+    const which = CLAUDE_BIN || await new Promise((res, rej) =>
       execFile('bash', ['-c', 'command -v claude'], (e, so) => e ? rej(e) : res(so.trim())));
     const binPath = fs.realpathSync(which);
     const st = fs.statSync(binPath);
@@ -727,7 +802,7 @@ function startSession({ cwd: dir, args = [], cols = 120, rows = 32, profile: pro
   // single-profile behaviour is byte-for-byte what it was before.
   if (!prof.isDefault) env.CLAUDE_CONFIG_DIR = prof.configDir;
   const claudeArgs = (Array.isArray(args) ? args : []).map(String);
-  let file = 'claude', spawnArgs = claudeArgs;
+  let file = CLAUDE_BIN || 'claude', spawnArgs = claudeArgs;
   if (sandbox) {
     // jail the session in a devcontainer: the launcher becomes the PTY process
     if (!sandboxInfo.available) throw new Error('sandbox unavailable: ' + sandboxInfo.reason);
@@ -947,7 +1022,7 @@ app.post('/api/mcp', (req, res) => {
       cliArgs.push('--', commandOrUrl, ...args.filter(a => typeof a === 'string'));
     } else throw new Error('unknown action');
     if (!safe(name)) throw new Error('invalid name');
-    execFile('claude', cliArgs, { cwd, timeout: 30_000 }, (err, stdout, stderr) => {
+    execFile(CLAUDE_BIN || 'claude', cliArgs, { cwd, timeout: 30_000 }, (err, stdout, stderr) => {
       if (err) return res.status(400).json({ error: (stderr || stdout || String(err)).trim() });
       broadcastEvent({ type: 'state' });
       res.json({ ok: true, output: (stdout || '').trim() });
